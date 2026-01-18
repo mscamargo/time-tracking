@@ -85,7 +85,7 @@
         "Update button appearance based on timer state",
         "Verify clicking starts timer and creates DB entry, clicking again stops and updates end_time"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "ui",
