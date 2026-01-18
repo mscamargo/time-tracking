@@ -1,5 +1,5 @@
 use adw::prelude::*;
-use chrono::{DateTime, Datelike, Local, NaiveDate, Utc, Weekday};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use gtk4 as gtk;
 use gtk4::glib;
 use rusqlite::Connection;
@@ -353,7 +353,7 @@ impl AppState {
             } else if let Some(project) = projects_for_bind.iter().find(|p| p.name == text) {
                 color_indicator.set_visible(true);
                 let css_provider = gtk::CssProvider::new();
-                css_provider.load_from_string(&format!(
+                css_provider.load_from_data(&format!(
                     "box {{ background-color: {}; border-radius: 6px; }}",
                     project.color
                 ));
@@ -375,7 +375,7 @@ impl AppState {
 /// Applies CSS styles for the application
 fn apply_css_styles() {
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(
+    provider.load_from_data(
         r#"
         .timer-display {
             font-family: monospace;
@@ -540,7 +540,7 @@ fn create_project_dropdown(projects: &[db::Project]) -> gtk::DropDown {
             color_indicator.set_visible(true);
             // Set the background color using inline CSS
             let css_provider = gtk::CssProvider::new();
-            css_provider.load_from_string(&format!(
+            css_provider.load_from_data(&format!(
                 "box {{ background-color: {}; border-radius: 6px; }}",
                 project.color
             ));
@@ -690,7 +690,7 @@ fn create_project_breakdown(
             .build();
 
         let css_provider = gtk::CssProvider::new();
-        css_provider.load_from_string(&format!(
+        css_provider.load_from_data(&format!(
             "box {{ background-color: {}; }}",
             color
         ));
@@ -752,7 +752,7 @@ fn create_entry_row_with_actions(
     if let Some(project_id) = entry.project_id {
         if let Ok(Some(project)) = db::get_project_by_id(&state.borrow().db_conn, project_id) {
             let css_provider = gtk::CssProvider::new();
-            css_provider.load_from_string(&format!(
+            css_provider.load_from_data(&format!(
                 "box {{ background-color: {}; border-radius: 2px; }}",
                 project.color
             ));
@@ -895,10 +895,13 @@ fn create_entry_row_with_actions(
 
         delete_button.connect_clicked(move |_| {
             // Create confirmation dialog
-            let dialog = adw::MessageDialog::builder()
+            let dialog = gtk::MessageDialog::builder()
                 .transient_for(&window_for_delete)
-                .heading("Delete Entry?")
-                .body(format!(
+                .modal(true)
+                .message_type(gtk::MessageType::Question)
+                .buttons(gtk::ButtonsType::None)
+                .text("Delete Entry?")
+                .secondary_text(format!(
                     "Are you sure you want to delete \"{}\"? This cannot be undone.",
                     if entry_description.is_empty() {
                         "(no description)"
@@ -908,16 +911,18 @@ fn create_entry_row_with_actions(
                 ))
                 .build();
 
-            dialog.add_response("cancel", "Cancel");
-            dialog.add_response("delete", "Delete");
-            dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-            dialog.set_default_response(Some("cancel"));
-            dialog.set_close_response("cancel");
+            dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            dialog.add_button("Delete", gtk::ResponseType::Accept);
+
+            // Style the delete button as destructive
+            if let Some(button) = dialog.widget_for_response(gtk::ResponseType::Accept) {
+                button.add_css_class("destructive-action");
+            }
 
             let state_for_response = state_for_delete.clone();
             let window_for_response = window_for_delete.clone();
-            dialog.connect_response(None, move |dialog, response| {
-                if response == "delete" {
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk::ResponseType::Accept {
                     if state_for_response.borrow_mut().delete_entry(entry_id) {
                         refresh_entries_list_with_actions(state_for_response.clone(), &window_for_response);
                     }
@@ -1165,7 +1170,7 @@ fn create_entry_row_compact(entry: &db::TimeEntry, conn: &Connection) -> gtk::Li
     if let Some(project_id) = entry.project_id {
         if let Ok(Some(project)) = db::get_project_by_id(conn, project_id) {
             let css_provider = gtk::CssProvider::new();
-            css_provider.load_from_string(&format!(
+            css_provider.load_from_data(&format!(
                 "box {{ background-color: {}; border-radius: 2px; }}",
                 project.color
             ));
@@ -1332,7 +1337,7 @@ fn create_project_row(
         .build();
 
     let css_provider = gtk::CssProvider::new();
-    css_provider.load_from_string(&format!(
+    css_provider.load_from_data(&format!(
         "box {{ background-color: {}; }}",
         project.color
     ));
@@ -1366,25 +1371,30 @@ fn create_project_row(
 
     delete_button.connect_clicked(move |_| {
         // Create confirmation dialog
-        let dialog = adw::MessageDialog::builder()
+        let dialog = gtk::MessageDialog::builder()
             .transient_for(&window_clone)
-            .heading("Delete Project?")
-            .body(format!(
+            .modal(true)
+            .message_type(gtk::MessageType::Question)
+            .buttons(gtk::ButtonsType::None)
+            .text("Delete Project?")
+            .secondary_text(format!(
                 "Are you sure you want to delete \"{}\"? Time entries will keep their descriptions but lose their project association.",
                 project_name
             ))
             .build();
 
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("delete", "Delete");
-        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
+        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+        dialog.add_button("Delete", gtk::ResponseType::Accept);
+
+        // Style the delete button as destructive
+        if let Some(button) = dialog.widget_for_response(gtk::ResponseType::Accept) {
+            button.add_css_class("destructive-action");
+        }
 
         let state_for_response = state_for_delete.clone();
         let projects_list_box_for_response = projects_list_box_clone.clone();
-        dialog.connect_response(None, move |dialog, response| {
-            if response == "delete" {
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
                 if let Err(e) = db::delete_project(&state_for_response.borrow().db_conn, project_id) {
                     state_for_response.borrow().show_error(&format!("Failed to delete project: {}", e));
                 } else {
@@ -1444,10 +1454,12 @@ fn refresh_projects_list(state: &Rc<RefCell<AppState>>, projects_list_box: &gtk:
 
 /// Shows the project management dialog
 fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationWindow) {
-    let dialog = adw::Dialog::builder()
+    let dialog = adw::Window::builder()
         .title("Manage Projects")
-        .content_width(350)
-        .content_height(450)
+        .default_width(350)
+        .default_height(450)
+        .modal(true)
+        .transient_for(parent)
         .build();
 
     let content = gtk::Box::builder()
@@ -1474,14 +1486,14 @@ fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationW
 
     // Color picker button
     let selected_color = Rc::new(RefCell::new(PROJECT_COLORS[0].to_string()));
-    let color_button = gtk::Button::builder()
+    let color_button = gtk::MenuButton::builder()
         .css_classes(["project-color-button"])
         .tooltip_text("Select color")
         .build();
 
     // Set initial color on button
     let initial_css = gtk::CssProvider::new();
-    initial_css.load_from_string(&format!(
+    initial_css.load_from_data(&format!(
         "button {{ background-color: {}; }}",
         selected_color.borrow()
     ));
@@ -1510,7 +1522,7 @@ fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationW
             .build();
 
         let css = gtk::CssProvider::new();
-        css.load_from_string(&format!("button {{ background-color: {}; }}", color));
+        css.load_from_data(&format!("button {{ background-color: {}; }}", color));
         color_option.style_context().add_provider(
             &css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
@@ -1525,7 +1537,7 @@ fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationW
             *selected_color_clone.borrow_mut() = color_str.clone();
             // Update the color button appearance
             let css = gtk::CssProvider::new();
-            css.load_from_string(&format!("button {{ background-color: {}; }}", color_str));
+            css.load_from_data(&format!("button {{ background-color: {}; }}", color_str));
             color_button_clone.style_context().add_provider(
                 &css,
                 gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
@@ -1533,7 +1545,7 @@ fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationW
             popover_clone.popdown();
         });
 
-        colors_grid.append(&color_option);
+        colors_grid.insert(&color_option, -1);
     }
 
     color_popover.set_child(Some(&colors_grid));
@@ -1636,8 +1648,8 @@ fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationW
         }
     });
 
-    dialog.set_child(Some(&content));
-    dialog.present(parent);
+    dialog.set_content(Some(&content));
+    dialog.present();
 }
 
 /// Builds and returns the main application window with Adwaita styling.
@@ -1779,9 +1791,8 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     content.append(&entries_section);
 
     // Wrap content in ToastOverlay for error notifications
-    let toast_overlay = adw::ToastOverlay::builder()
-        .child(&content)
-        .build();
+    let toast_overlay = adw::ToastOverlay::new();
+    toast_overlay.set_child(Some(&content));
 
     // Create the main window with Adwaita styling
     let window = adw::ApplicationWindow::builder()
@@ -1850,12 +1861,9 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     setup_system_tray(app, state.clone(), &window);
 
     // Handle window close request - minimize to tray instead of quitting
-    let app_for_close = app.clone();
     window.connect_close_request(move |window| {
         // Hide the window instead of closing when tray is active
         window.set_visible(false);
-        // Prevent the app from quitting when window is hidden
-        app_for_close.hold();
         // Return Propagation::Stop to prevent the default close behavior
         glib::Propagation::Stop
     });
@@ -1865,10 +1873,13 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
 
 /// Shows the keyboard shortcuts help dialog
 fn show_shortcuts_dialog(parent: &adw::ApplicationWindow) {
-    let dialog = adw::MessageDialog::builder()
+    let dialog = gtk::MessageDialog::builder()
         .transient_for(parent)
-        .heading("Keyboard Shortcuts")
-        .body(
+        .modal(true)
+        .message_type(gtk::MessageType::Info)
+        .buttons(gtk::ButtonsType::Close)
+        .text("Keyboard Shortcuts")
+        .secondary_text(
             "Ctrl+S or Space — Start/Stop timer\n\
              Ctrl+N — Focus description field\n\
              Ctrl+P — Open project selector\n\
@@ -1877,9 +1888,9 @@ fn show_shortcuts_dialog(parent: &adw::ApplicationWindow) {
         )
         .build();
 
-    dialog.add_response("close", "Close");
-    dialog.set_default_response(Some("close"));
-    dialog.set_close_response("close");
+    dialog.connect_response(|dialog, _| {
+        dialog.close();
+    });
     dialog.present();
 }
 
@@ -1962,48 +1973,25 @@ fn setup_system_tray(
     state.borrow().update_tray();
 
     // Create callbacks for tray actions
-    // We need to use glib::MainContext to invoke GTK actions from the tray thread
+    // Note: These callbacks are no-ops for now because Rc/GTK objects can't be sent across threads
+    // TODO: Implement proper channel-based communication for tray actions
 
-    // Toggle timer callback
-    let state_for_toggle = state.clone();
-    let window_for_toggle = window.clone();
-    let on_toggle_timer: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-        let state_clone = state_for_toggle.clone();
-        let window_clone = window_for_toggle.clone();
-        glib::MainContext::default().invoke(move || {
-            if state_clone.borrow_mut().toggle_timer() {
-                refresh_view(state_clone.clone(), &window_clone);
-            }
-        });
+    let on_toggle_timer: Box<dyn Fn() + Send + Sync> = Box::new(|| {
+        // No-op - would need channel-based implementation
     });
 
-    // Show window callback
-    let window_for_show = window.clone();
-    let app_for_show = app.clone();
-    let on_show_window: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-        let window_clone = window_for_show.clone();
-        let app_clone = app_for_show.clone();
-        glib::MainContext::default().invoke(move || {
-            window_clone.set_visible(true);
-            window_clone.present();
-            // Release the hold we added when hiding
-            app_clone.release();
-        });
+    let on_show_window: Box<dyn Fn() + Send + Sync> = Box::new(|| {
+        // No-op - would need channel-based implementation
     });
 
-    // Quit callback
-    let app_for_quit = app.clone();
-    let on_quit: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-        let app_clone = app_for_quit.clone();
-        glib::MainContext::default().invoke(move || {
-            app_clone.quit();
-        });
+    let on_quit: Box<dyn Fn() + Send + Sync> = Box::new(|| {
+        // No-op - would need channel-based implementation
     });
 
     // Start the tray service
     if let Ok(mut manager) = tray_manager.lock() {
         manager.start(on_toggle_timer, on_show_window, on_quit);
-    }
+    };
 }
 
 /// Runs the Adwaita application.
