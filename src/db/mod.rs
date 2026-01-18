@@ -250,6 +250,28 @@ pub fn delete_entry(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Gets a project by ID
+pub fn get_project_by_id(conn: &Connection, id: i64) -> Result<Option<Project>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, color, created_at FROM projects WHERE id = ?1"
+    )?;
+
+    let mut rows = stmt.query(params![id])?;
+
+    match rows.next()? {
+        Some(row) => {
+            let created_at_str: String = row.get(3)?;
+            Ok(Some(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                color: row.get(2)?,
+                created_at: parse_datetime(&created_at_str),
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,5 +599,28 @@ mod tests {
         // Deleting a non-existent entry should not error
         let result = delete_entry(&conn, 999);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_project_by_id() {
+        let conn = create_test_db();
+        let project = create_project(&conn, "Work", "#3498db").unwrap();
+
+        let found = get_project_by_id(&conn, project.id).unwrap();
+
+        assert!(found.is_some());
+        let found_project = found.unwrap();
+        assert_eq!(found_project.id, project.id);
+        assert_eq!(found_project.name, "Work");
+        assert_eq!(found_project.color, "#3498db");
+    }
+
+    #[test]
+    fn test_get_project_by_id_not_found() {
+        let conn = create_test_db();
+
+        let found = get_project_by_id(&conn, 999).unwrap();
+
+        assert!(found.is_none());
     }
 }

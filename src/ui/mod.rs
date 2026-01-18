@@ -1,5 +1,5 @@
 use adw::prelude::*;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use gtk4 as gtk;
 use gtk4::glib;
 use rusqlite::Connection;
@@ -17,6 +17,8 @@ pub struct AppState {
     pub project_dropdown: gtk::DropDown,
     pub projects: Vec<db::Project>,
     pub db_conn: Connection,
+    pub entries_list_box: gtk::ListBox,
+    pub day_total_label: gtk::Label,
 }
 
 impl AppState {
@@ -27,6 +29,8 @@ impl AppState {
         project_dropdown: gtk::DropDown,
         projects: Vec<db::Project>,
         db_conn: Connection,
+        entries_list_box: gtk::ListBox,
+        day_total_label: gtk::Label,
     ) -> Self {
         Self {
             running_entry: None,
@@ -36,6 +40,8 @@ impl AppState {
             project_dropdown,
             projects,
             db_conn,
+            entries_list_box,
+            day_total_label,
         }
     }
 
@@ -92,6 +98,8 @@ impl AppState {
                 // Make description field and project dropdown non-editable while timer is running
                 self.description_entry.set_sensitive(false);
                 self.project_dropdown.set_sensitive(false);
+                // Update entries list
+                self.refresh_entries_list();
             }
             Err(e) => {
                 eprintln!("Failed to create time entry: {}", e);
@@ -114,6 +122,8 @@ impl AppState {
                     // Reset project dropdown to "No Project" and make it editable again
                     self.project_dropdown.set_selected(0);
                     self.project_dropdown.set_sensitive(true);
+                    // Update entries list
+                    self.refresh_entries_list();
                 }
                 Err(e) => {
                     eprintln!("Failed to stop time entry: {}", e);
@@ -149,6 +159,184 @@ impl AppState {
         };
         self.timer_label.set_label(&display);
     }
+
+    /// Formats a duration in seconds as HH:MM:SS
+    fn format_duration(total_seconds: i64) -> String {
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+    }
+
+    /// Refreshes the entries list for today
+    pub fn refresh_entries_list(&self) {
+        // Remove all existing rows
+        while let Some(child) = self.entries_list_box.first_child() {
+            self.entries_list_box.remove(&child);
+        }
+
+        let today = Local::now().date_naive();
+        let entries = db::get_entries_for_date(&self.db_conn, today).unwrap_or_default();
+
+        // Calculate total time for the day
+        let mut total_seconds: i64 = 0;
+        for entry in &entries {
+            let end = entry.end_time.unwrap_or_else(Utc::now);
+            let duration = end.signed_duration_since(entry.start_time).num_seconds().max(0);
+            total_seconds += duration;
+        }
+
+        // Update the day total label
+        let today_formatted = today.format("%A, %B %d").to_string();
+        self.day_total_label.set_markup(&format!(
+            "<b>{}</b>  •  Total: {}",
+            today_formatted,
+            Self::format_duration(total_seconds)
+        ));
+
+        if entries.is_empty() {
+            // Show empty state message
+            let empty_label = gtk::Label::builder()
+                .label("No entries for today")
+                .css_classes(["dim-label"])
+                .margin_top(20)
+                .margin_bottom(20)
+                .build();
+            self.entries_list_box.append(&empty_label);
+        } else {
+            // Add entry rows
+            for entry in entries {
+                let row = self.create_entry_row(&entry);
+                self.entries_list_box.append(&row);
+            }
+        }
+    }
+
+    /// Creates a list box row for a time entry
+    fn create_entry_row(&self, entry: &db::TimeEntry) -> gtk::ListBoxRow {
+        let row = gtk::ListBoxRow::builder()
+            .selectable(false)
+            .activatable(false)
+            .build();
+
+        let hbox = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(12)
+            .margin_top(8)
+            .margin_bottom(8)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+
+        // Project color indicator
+        let color_box = gtk::Box::builder()
+            .width_request(4)
+            .valign(gtk::Align::Fill)
+            .build();
+
+        if let Some(project_id) = entry.project_id {
+            if let Ok(Some(project)) = db::get_project_by_id(&self.db_conn, project_id) {
+                let css_provider = gtk::CssProvider::new();
+                css_provider.load_from_string(&format!(
+                    "box {{ background-color: {}; border-radius: 2px; }}",
+                    project.color
+                ));
+                color_box.style_context().add_provider(
+                    &css_provider,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
+            }
+        }
+
+        hbox.append(&color_box);
+
+        // Main content (description + project name)
+        let content_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .hexpand(true)
+            .build();
+
+        // Description
+        let description = if entry.description.is_empty() {
+            "(no description)".to_string()
+        } else {
+            entry.description.clone()
+        };
+
+        let desc_label = gtk::Label::builder()
+            .label(&description)
+            .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        content_box.append(&desc_label);
+
+        // Project name (if any)
+        let project_name = if let Some(project_id) = entry.project_id {
+            db::get_project_by_id(&self.db_conn, project_id)
+                .ok()
+                .flatten()
+                .map(|p| p.name)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if !project_name.is_empty() {
+            let project_label = gtk::Label::builder()
+                .label(&project_name)
+                .halign(gtk::Align::Start)
+                .css_classes(["dim-label", "caption"])
+                .build();
+            content_box.append(&project_label);
+        }
+
+        hbox.append(&content_box);
+
+        // Time info (duration + start-end times)
+        let time_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .halign(gtk::Align::End)
+            .build();
+
+        // Duration
+        let end = entry.end_time.unwrap_or_else(Utc::now);
+        let duration_secs = end.signed_duration_since(entry.start_time).num_seconds().max(0);
+        let duration_str = Self::format_duration(duration_secs);
+
+        let duration_label = gtk::Label::builder()
+            .label(&duration_str)
+            .halign(gtk::Align::End)
+            .css_classes(["monospace"])
+            .build();
+        time_box.append(&duration_label);
+
+        // Start-end times
+        let start_local = entry.start_time.with_timezone(&Local);
+        let time_range = if entry.end_time.is_some() {
+            let end_local = end.with_timezone(&Local);
+            format!(
+                "{} - {}",
+                start_local.format("%H:%M"),
+                end_local.format("%H:%M")
+            )
+        } else {
+            format!("{} - now", start_local.format("%H:%M"))
+        };
+
+        let time_range_label = gtk::Label::builder()
+            .label(&time_range)
+            .halign(gtk::Align::End)
+            .css_classes(["dim-label", "caption"])
+            .build();
+        time_box.append(&time_range_label);
+
+        hbox.append(&time_box);
+
+        row.set_child(Some(&hbox));
+        row
+    }
 }
 
 /// Applies CSS styles for the application
@@ -165,6 +353,13 @@ fn apply_css_styles() {
             min-width: 64px;
             min-height: 64px;
             border-radius: 32px;
+        }
+        .monospace {
+            font-family: monospace;
+        }
+        .day-header {
+            padding: 12px;
+            background-color: alpha(@window_bg_color, 0.5);
         }
         "#,
     );
@@ -315,6 +510,19 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     // Create the start/stop button
     let start_stop_button = create_start_stop_button();
 
+    // Create the entries list box
+    let entries_list_box = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+
+    // Create the day total label (header for entries section)
+    let day_total_label = gtk::Label::builder()
+        .use_markup(true)
+        .halign(gtk::Align::Start)
+        .css_classes(["day-header"])
+        .build();
+
     // Create app state
     let state = Rc::new(RefCell::new(AppState::new(
         timer_label.clone(),
@@ -323,6 +531,8 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         project_dropdown.clone(),
         projects,
         conn,
+        entries_list_box.clone(),
+        day_total_label.clone(),
     )));
 
     // Check for running entry from database and restore state
@@ -366,6 +576,36 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     timer_section.append(&start_stop_button);
 
     content.append(&timer_section);
+
+    // Add separator between timer and entries list
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.set_margin_top(10);
+    content.append(&separator);
+
+    // Create entries section with header and scrollable list
+    let entries_section = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(0)
+        .vexpand(true)
+        .build();
+
+    // Add day header label
+    entries_section.append(&day_total_label);
+
+    // Create scrollable window for entries list
+    let scrolled_window = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .build();
+
+    scrolled_window.set_child(Some(&entries_list_box));
+    entries_section.append(&scrolled_window);
+
+    content.append(&entries_section);
+
+    // Initial load of today's entries
+    state.borrow().refresh_entries_list();
 
     // Create the main window with Adwaita styling
     adw::ApplicationWindow::builder()

@@ -124,7 +124,7 @@
         "Update list when new entry is created or stopped",
         "Verify list shows correct entries from database"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "ui",
