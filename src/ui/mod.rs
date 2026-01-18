@@ -6,8 +6,10 @@ use rusqlite::Connection;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::db;
+use crate::tray::TrayManager;
 
 /// View mode for the entries list
 #[derive(Clone, Copy, PartialEq)]
@@ -31,6 +33,7 @@ pub struct AppState {
     pub view_mode: ViewMode,
     pub view_toggle: gtk::Box,
     pub entries_section: gtk::Box,
+    pub tray_manager: Option<Arc<Mutex<TrayManager>>>,
 }
 
 impl AppState {
@@ -60,6 +63,31 @@ impl AppState {
             view_mode: ViewMode::Today,
             view_toggle,
             entries_section,
+            tray_manager: None,
+        }
+    }
+
+    /// Sets the tray manager reference
+    pub fn set_tray_manager(&mut self, tray_manager: Arc<Mutex<TrayManager>>) {
+        self.tray_manager = Some(tray_manager);
+    }
+
+    /// Updates the system tray with current timer state
+    pub fn update_tray(&self) {
+        if let Some(ref tray_manager) = self.tray_manager {
+            let is_running = self.running_entry.is_some();
+            let elapsed = match &self.running_entry {
+                Some(entry) => self.format_elapsed(entry.start_time),
+                None => "00:00:00".to_string(),
+            };
+            let description = match &self.running_entry {
+                Some(entry) => entry.description.clone(),
+                None => String::new(),
+            };
+
+            if let Ok(manager) = tray_manager.lock() {
+                manager.update(is_running, &elapsed, &description);
+            }
         }
     }
 
@@ -186,6 +214,8 @@ impl AppState {
             None => "00:00:00".to_string(),
         };
         self.timer_label.set_label(&display);
+        // Also update the system tray
+        self.update_tray();
     }
 
     /// Continues a time entry by starting a new entry with the same description and project
@@ -1726,6 +1756,20 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     // Set up keyboard shortcuts
     setup_keyboard_shortcuts(&window, state.clone(), &description_entry, &project_dropdown);
 
+    // Set up system tray
+    setup_system_tray(app, state.clone(), &window);
+
+    // Handle window close request - minimize to tray instead of quitting
+    let app_for_close = app.clone();
+    window.connect_close_request(move |window| {
+        // Hide the window instead of closing when tray is active
+        window.set_visible(false);
+        // Prevent the app from quitting when window is hidden
+        app_for_close.hold();
+        // Return Propagation::Stop to prevent the default close behavior
+        glib::Propagation::Stop
+    });
+
     window
 }
 
@@ -1811,6 +1855,65 @@ fn setup_keyboard_shortcuts(
     });
 
     window.add_controller(controller);
+}
+
+/// Sets up the system tray integration
+fn setup_system_tray(
+    app: &adw::Application,
+    state: Rc<RefCell<AppState>>,
+    window: &adw::ApplicationWindow,
+) {
+    let tray_manager = Arc::new(Mutex::new(TrayManager::new()));
+
+    // Store tray manager in app state
+    state.borrow_mut().set_tray_manager(tray_manager.clone());
+
+    // Initial tray state update
+    state.borrow().update_tray();
+
+    // Create callbacks for tray actions
+    // We need to use glib::MainContext to invoke GTK actions from the tray thread
+
+    // Toggle timer callback
+    let state_for_toggle = state.clone();
+    let window_for_toggle = window.clone();
+    let on_toggle_timer: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let state_clone = state_for_toggle.clone();
+        let window_clone = window_for_toggle.clone();
+        glib::MainContext::default().invoke(move || {
+            if state_clone.borrow_mut().toggle_timer() {
+                refresh_view(state_clone.clone(), &window_clone);
+            }
+        });
+    });
+
+    // Show window callback
+    let window_for_show = window.clone();
+    let app_for_show = app.clone();
+    let on_show_window: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let window_clone = window_for_show.clone();
+        let app_clone = app_for_show.clone();
+        glib::MainContext::default().invoke(move || {
+            window_clone.set_visible(true);
+            window_clone.present();
+            // Release the hold we added when hiding
+            app_clone.release();
+        });
+    });
+
+    // Quit callback
+    let app_for_quit = app.clone();
+    let on_quit: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let app_clone = app_for_quit.clone();
+        glib::MainContext::default().invoke(move || {
+            app_clone.quit();
+        });
+    });
+
+    // Start the tray service
+    if let Ok(mut manager) = tray_manager.lock() {
+        manager.start(on_toggle_timer, on_show_window, on_quit);
+    }
 }
 
 /// Runs the Adwaita application.

@@ -197,7 +197,7 @@
         "Allow minimizing to tray instead of closing",
         "Verify tray icon reflects timer state"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "polish",

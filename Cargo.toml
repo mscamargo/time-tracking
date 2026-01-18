@@ -9,3 +9,4 @@ libadwaita = "0.7"
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = "0.4"
 dirs = "5.0"
+ksni = "0.2"
