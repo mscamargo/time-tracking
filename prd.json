@@ -1,11 +1,214 @@
 {
   "project": "Time Tracking",
-  "description": "",
+  "description": "A minimal time tracking desktop app for Linux, similar to Toggl Track, built with Rust, GTK4, and SQLite",
   "tasks": [
     {
+      "category": "setup",
+      "description": "Initialize Rust project with required dependencies",
+      "steps": [
+        "Create new Cargo project with `cargo init`",
+        "Add dependencies to Cargo.toml: gtk4, libadwaita, rusqlite, chrono, dirs",
+        "Create basic main.rs that initializes GTK and shows empty window",
+        "Run `cargo build` to verify dependencies resolve"
+      ],
+      "passes": false
+    },
+    {
+      "category": "database",
+      "description": "Create SQLite database schema",
+      "steps": [
+        "Create src/db/mod.rs module",
+        "Define schema with tables: projects (id, name, color, created_at) and time_entries (id, project_id, description, start_time, end_time, created_at)",
+        "Implement init_db() function that creates tables if not exists",
+        "Store database in XDG data directory (~/.local/share/time-tracking/)",
+        "Write unit test that creates DB and verifies tables exist"
+      ],
+      "passes": false
+    },
+    {
+      "category": "database",
+      "description": "Implement project CRUD operations",
+      "steps": [
+        "Create Project struct with id, name, color, created_at fields",
+        "Implement create_project(name, color) -> Result<Project>",
+        "Implement get_all_projects() -> Result<Vec<Project>>",
+        "Implement delete_project(id) -> Result<()>",
+        "Write tests for each operation"
+      ],
+      "passes": false
+    },
+    {
+      "category": "database",
+      "description": "Implement time entry CRUD operations",
+      "steps": [
+        "Create TimeEntry struct with id, project_id, description, start_time, end_time fields",
+        "Implement create_entry(project_id, description, start_time) -> Result<TimeEntry>",
+        "Implement stop_entry(id, end_time) -> Result<()>",
+        "Implement get_running_entry() -> Result<Option<TimeEntry>> for entry with null end_time",
+        "Implement get_entries_for_date(date) -> Result<Vec<TimeEntry>>",
+        "Implement delete_entry(id) -> Result<()>",
+        "Write tests for each operation"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Create main application window with Adwaita styling",
+      "steps": [
+        "Create src/ui/mod.rs module",
+        "Initialize libadwaita application",
+        "Create main window with title 'Time Tracking' and reasonable default size (400x600)",
+        "Add HeaderBar with app title",
+        "Verify window opens and closes cleanly"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Implement timer display widget",
+      "steps": [
+        "Create timer display label showing HH:MM:SS format",
+        "Style the timer with large, monospace font",
+        "Implement timer update using glib::timeout_add_seconds",
+        "Display 00:00:00 when no timer is running",
+        "Verify timer increments every second when active"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Implement start/stop timer button",
+      "steps": [
+        "Add circular start/stop button below timer display",
+        "Show play icon when stopped, stop icon when running",
+        "Connect button click to start new time entry or stop current one",
+        "Update button appearance based on timer state",
+        "Verify clicking starts timer and creates DB entry, clicking again stops and updates end_time"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Add description input field",
+      "steps": [
+        "Add text entry field above timer for task description",
+        "Set placeholder text 'What are you working on?'",
+        "Save description when starting timer",
+        "Show current entry description when timer is running",
+        "Clear field when timer stops",
+        "Verify description is saved to database with time entry"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Add project selector dropdown",
+      "steps": [
+        "Add dropdown/combo box next to description field",
+        "Populate with projects from database",
+        "Include 'No Project' option as default",
+        "Show colored indicator for selected project",
+        "Save selected project_id when starting timer",
+        "Verify project association is saved to database"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Display today's time entries list",
+      "steps": [
+        "Add scrollable list below timer section",
+        "Show today's entries with: description, project name, duration, start-end times",
+        "Group entries by date with date header",
+        "Show total time for the day in header",
+        "Update list when new entry is created or stopped",
+        "Verify list shows correct entries from database"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Add entry actions (continue, delete)",
+      "steps": [
+        "Add context menu or action buttons on each entry row",
+        "Implement 'Continue' action that starts new entry with same description/project",
+        "Implement 'Delete' action with confirmation dialog",
+        "Update entry list after actions",
+        "Verify continue creates new running entry, delete removes from database"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Create project management dialog",
+      "steps": [
+        "Add menu button in header bar to access projects",
+        "Create dialog listing all projects",
+        "Add form to create new project with name and color picker",
+        "Add delete button for each project",
+        "Update project dropdown after changes",
+        "Verify projects are persisted to database"
+      ],
+      "passes": false
+    },
+    {
       "category": "functional",
-      "description": "Example",
-      "steps": ["Step 1", "Step 2", "Step 3"],
+      "description": "Persist and restore running timer on app restart",
+      "steps": [
+        "On app start, check for running entry (end_time is null)",
+        "If found, restore timer state with correct elapsed time",
+        "Update UI to show running state with description and project",
+        "Verify closing and reopening app continues the same timer"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Add keyboard shortcuts",
+      "steps": [
+        "Ctrl+S or Space: Start/stop timer",
+        "Ctrl+N: Focus description field",
+        "Ctrl+P: Open project selector",
+        "Escape: Stop timer if running",
+        "Add shortcuts to help/about dialog",
+        "Verify each shortcut works correctly"
+      ],
+      "passes": false
+    },
+    {
+      "category": "ui",
+      "description": "Show weekly summary view",
+      "steps": [
+        "Add tab or toggle to switch between today and week view",
+        "Display entries grouped by day for current week",
+        "Show daily totals and weekly total",
+        "Show breakdown by project with colored bars",
+        "Verify totals match sum of individual entries"
+      ],
+      "passes": false
+    },
+    {
+      "category": "polish",
+      "description": "Add system tray integration",
+      "steps": [
+        "Add system tray icon using libappindicator or equivalent",
+        "Show running timer status in tray tooltip",
+        "Add tray menu with Start/Stop and Quit options",
+        "Allow minimizing to tray instead of closing",
+        "Verify tray icon reflects timer state"
+      ],
+      "passes": false
+    },
+    {
+      "category": "polish",
+      "description": "Handle edge cases and improve UX",
+      "steps": [
+        "Handle very long descriptions with ellipsis",
+        "Add loading states for database operations",
+        "Show error toasts for failed operations",
+        "Add empty state message when no entries exist",
+        "Verify app handles database errors gracefully"
+      ],
       "passes": false
     }
   ]
