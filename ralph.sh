@@ -6,7 +6,11 @@ if [ -z "$1" ]; then
   exit 1
 fi
 
+echo "Starting Ralph Loop with $1 iterations..."
+
 for ((i=1; i<=$1; i++)); do
+  echo "Starting iteration $i"
+
   result=$(docker sandbox run claude --permission-mode acceptEdits -p "@prd.json @progress.txt \
   1. Find the highest-priority task and implement it. \
   2. Run your tests and type checks. \
