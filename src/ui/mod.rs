@@ -34,6 +34,7 @@ pub struct AppState {
     pub view_toggle: gtk::Box,
     pub entries_section: gtk::Box,
     pub tray_manager: Option<Arc<Mutex<TrayManager>>>,
+    pub toast_overlay: Option<adw::ToastOverlay>,
 }
 
 impl AppState {
@@ -64,6 +65,37 @@ impl AppState {
             view_toggle,
             entries_section,
             tray_manager: None,
+            toast_overlay: None,
+        }
+    }
+
+    /// Sets the toast overlay reference for showing error messages
+    pub fn set_toast_overlay(&mut self, toast_overlay: adw::ToastOverlay) {
+        self.toast_overlay = Some(toast_overlay);
+    }
+
+    /// Shows an error toast message to the user
+    pub fn show_error(&self, message: &str) {
+        if let Some(ref overlay) = self.toast_overlay {
+            let toast = adw::Toast::builder()
+                .title(message)
+                .timeout(5)
+                .priority(adw::ToastPriority::High)
+                .build();
+            overlay.add_toast(toast);
+        } else {
+            eprintln!("Error: {}", message);
+        }
+    }
+
+    /// Shows an info toast message to the user
+    pub fn show_info(&self, message: &str) {
+        if let Some(ref overlay) = self.toast_overlay {
+            let toast = adw::Toast::builder()
+                .title(message)
+                .timeout(3)
+                .build();
+            overlay.add_toast(toast);
         }
     }
 
@@ -139,6 +171,9 @@ impl AppState {
     /// Starts a new time entry
     /// Returns true if timer was started successfully
     pub fn start_timer(&mut self) -> bool {
+        // Add visual feedback - disable button temporarily
+        self.start_stop_button.set_sensitive(false);
+
         let start_time = Utc::now();
         let description = self.description_entry.text().to_string();
         let project_id = self.get_selected_project_id();
@@ -150,10 +185,12 @@ impl AppState {
                 // Make description field and project dropdown non-editable while timer is running
                 self.description_entry.set_sensitive(false);
                 self.project_dropdown.set_sensitive(false);
+                self.start_stop_button.set_sensitive(true);
                 true
             }
             Err(e) => {
-                eprintln!("Failed to create time entry: {}", e);
+                self.show_error(&format!("Failed to start timer: {}", e));
+                self.start_stop_button.set_sensitive(true);
                 false
             }
         }
@@ -163,6 +200,9 @@ impl AppState {
     /// Returns true if timer was stopped successfully
     pub fn stop_timer(&mut self) -> bool {
         if let Some(ref entry) = self.running_entry {
+            // Add visual feedback - disable button temporarily
+            self.start_stop_button.set_sensitive(false);
+
             let end_time = Utc::now();
             match db::stop_entry(&self.db_conn, entry.id, end_time) {
                 Ok(()) => {
@@ -175,10 +215,12 @@ impl AppState {
                     // Reset project dropdown to "No Project" and make it editable again
                     self.project_dropdown.set_selected(0);
                     self.project_dropdown.set_sensitive(true);
+                    self.start_stop_button.set_sensitive(true);
                     true
                 }
                 Err(e) => {
-                    eprintln!("Failed to stop time entry: {}", e);
+                    self.show_error(&format!("Failed to stop timer: {}", e));
+                    self.start_stop_button.set_sensitive(true);
                     false
                 }
             }
@@ -242,12 +284,13 @@ impl AppState {
         // Don't allow deleting the currently running entry
         if let Some(ref running) = self.running_entry {
             if running.id == entry_id {
+                self.show_error("Cannot delete a running entry");
                 return false;
             }
         }
 
         if let Err(e) = db::delete_entry(&self.db_conn, entry_id) {
-            eprintln!("Failed to delete entry: {}", e);
+            self.show_error(&format!("Failed to delete entry: {}", e));
             return false;
         }
 
@@ -257,7 +300,13 @@ impl AppState {
     /// Refreshes the project dropdown with current projects from database
     pub fn refresh_projects(&mut self) {
         // Reload projects from database
-        self.projects = db::get_all_projects(&self.db_conn).unwrap_or_default();
+        match db::get_all_projects(&self.db_conn) {
+            Ok(projects) => self.projects = projects,
+            Err(e) => {
+                self.show_error(&format!("Failed to load projects: {}", e));
+                self.projects = Vec::new();
+            }
+        }
 
         // Build the list of project names with "No Project" as first option
         let mut labels: Vec<String> = vec!["No Project".to_string()];
@@ -898,7 +947,13 @@ fn refresh_entries_list_with_actions(state: Rc<RefCell<AppState>>, window: &adw:
     }
 
     let today = Local::now().date_naive();
-    let entries = db::get_entries_for_date(&state_borrow.db_conn, today).unwrap_or_default();
+    let entries = match db::get_entries_for_date(&state_borrow.db_conn, today) {
+        Ok(entries) => entries,
+        Err(e) => {
+            state_borrow.show_error(&format!("Failed to load entries: {}", e));
+            Vec::new()
+        }
+    };
 
     // Calculate total time for the day
     let mut total_seconds: i64 = 0;
@@ -953,8 +1008,13 @@ fn refresh_weekly_view(state: Rc<RefCell<AppState>>, window: &adw::ApplicationWi
 
     // Get entries for the current week
     let (week_start, week_end) = get_current_week_range();
-    let all_entries = db::get_entries_for_date_range(&state_borrow.db_conn, week_start, week_end)
-        .unwrap_or_default();
+    let all_entries = match db::get_entries_for_date_range(&state_borrow.db_conn, week_start, week_end) {
+        Ok(entries) => entries,
+        Err(e) => {
+            state_borrow.show_error(&format!("Failed to load entries: {}", e));
+            Vec::new()
+        }
+    };
 
     // Calculate weekly total
     let weekly_total_seconds = calculate_entries_duration(&all_entries);
@@ -1167,7 +1227,13 @@ fn refresh_today_view(state: Rc<RefCell<AppState>>, window: &adw::ApplicationWin
 
     // Recreate the day total label and entries list
     let today = Local::now().date_naive();
-    let entries = db::get_entries_for_date(&state_borrow.db_conn, today).unwrap_or_default();
+    let entries = match db::get_entries_for_date(&state_borrow.db_conn, today) {
+        Ok(entries) => entries,
+        Err(e) => {
+            state_borrow.show_error(&format!("Failed to load entries: {}", e));
+            Vec::new()
+        }
+    };
 
     // Calculate total time for the day
     let total_seconds = calculate_entries_duration(&entries);
@@ -1320,7 +1386,7 @@ fn create_project_row(
         dialog.connect_response(None, move |dialog, response| {
             if response == "delete" {
                 if let Err(e) = db::delete_project(&state_for_response.borrow().db_conn, project_id) {
-                    eprintln!("Failed to delete project: {}", e);
+                    state_for_response.borrow().show_error(&format!("Failed to delete project: {}", e));
                 } else {
                     // Refresh the projects list in the dialog
                     refresh_projects_list(&state_for_response, &projects_list_box_for_response);
@@ -1348,7 +1414,13 @@ fn refresh_projects_list(state: &Rc<RefCell<AppState>>, projects_list_box: &gtk:
     }
 
     // Reload projects from database
-    let projects = db::get_all_projects(&state.borrow().db_conn).unwrap_or_default();
+    let projects = match db::get_all_projects(&state.borrow().db_conn) {
+        Ok(projects) => projects,
+        Err(e) => {
+            state.borrow().show_error(&format!("Failed to load projects: {}", e));
+            Vec::new()
+        }
+    };
 
     if projects.is_empty() {
         // Show empty state
@@ -1522,12 +1594,13 @@ fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationW
     add_button.connect_clicked(move |_| {
         let name = name_entry_clone.text().to_string();
         if name.trim().is_empty() {
+            state_for_add.borrow().show_error("Project name cannot be empty");
             return;
         }
 
         let color = selected_color_for_add.borrow().clone();
         if let Err(e) = db::create_project(&state_for_add.borrow().db_conn, &name, &color) {
-            eprintln!("Failed to create project: {}", e);
+            state_for_add.borrow().show_error(&format!("Failed to create project: {}", e));
         } else {
             // Clear the name entry
             name_entry_clone.set_text("");
@@ -1546,12 +1619,13 @@ fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationW
     name_entry.connect_activate(move |entry| {
         let name = entry.text().to_string();
         if name.trim().is_empty() {
+            state_for_activate.borrow().show_error("Project name cannot be empty");
             return;
         }
 
         let color = selected_color_for_activate.borrow().clone();
         if let Err(e) = db::create_project(&state_for_activate.borrow().db_conn, &name, &color) {
-            eprintln!("Failed to create project: {}", e);
+            state_for_activate.borrow().show_error(&format!("Failed to create project: {}", e));
         } else {
             // Clear the name entry
             entry.set_text("");
@@ -1646,16 +1720,26 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     )));
 
     // Check for running entry from database and restore state
-    if let Ok(Some(running_entry)) = db::get_running_entry(&state.borrow().db_conn) {
-        // Restore description text from running entry
-        state.borrow().description_entry.set_text(&running_entry.description);
-        state.borrow().description_entry.set_sensitive(false);
-        // Restore project selection from running entry
-        state.borrow().set_selected_project(running_entry.project_id);
-        state.borrow().project_dropdown.set_sensitive(false);
-        state.borrow_mut().running_entry = Some(running_entry);
-        state.borrow().update_button_appearance();
-        state.borrow().update_timer_display();
+    match db::get_running_entry(&state.borrow().db_conn) {
+        Ok(Some(running_entry)) => {
+            // Restore description text from running entry
+            state.borrow().description_entry.set_text(&running_entry.description);
+            state.borrow().description_entry.set_sensitive(false);
+            // Restore project selection from running entry
+            state.borrow().set_selected_project(running_entry.project_id);
+            state.borrow().project_dropdown.set_sensitive(false);
+            state.borrow_mut().running_entry = Some(running_entry);
+            state.borrow().update_button_appearance();
+            state.borrow().update_timer_display();
+        }
+        Ok(None) => {
+            // No running entry, timer is stopped
+        }
+        Err(e) => {
+            eprintln!("Failed to check for running entry: {}", e);
+            // Toast overlay not yet set, so we can't show a toast here
+            // The error is logged to stderr
+        }
     }
 
     // Set up timer update callback
@@ -1694,17 +1778,23 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     // Add entries section
     content.append(&entries_section);
 
+    // Wrap content in ToastOverlay for error notifications
+    let toast_overlay = adw::ToastOverlay::builder()
+        .child(&content)
+        .build();
+
     // Create the main window with Adwaita styling
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Time Tracking")
         .default_width(400)
         .default_height(600)
-        .content(&content)
+        .content(&toast_overlay)
         .build();
 
-    // Store window reference in state
+    // Store window and toast overlay references in state
     state.borrow_mut().set_window(window.clone());
+    state.borrow_mut().set_toast_overlay(toast_overlay);
 
     // Connect button click handler (needs window reference for list refresh)
     let state_for_button = state.clone();
