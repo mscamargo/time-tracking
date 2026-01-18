@@ -14,6 +14,8 @@ pub struct AppState {
     pub timer_label: gtk::Label,
     pub start_stop_button: gtk::Button,
     pub description_entry: gtk::Entry,
+    pub project_dropdown: gtk::DropDown,
+    pub projects: Vec<db::Project>,
     pub db_conn: Connection,
 }
 
@@ -22,6 +24,8 @@ impl AppState {
         timer_label: gtk::Label,
         start_stop_button: gtk::Button,
         description_entry: gtk::Entry,
+        project_dropdown: gtk::DropDown,
+        projects: Vec<db::Project>,
         db_conn: Connection,
     ) -> Self {
         Self {
@@ -29,7 +33,34 @@ impl AppState {
             timer_label,
             start_stop_button,
             description_entry,
+            project_dropdown,
+            projects,
             db_conn,
+        }
+    }
+
+    /// Gets the selected project_id from the dropdown
+    /// Returns None if "No Project" is selected (index 0)
+    pub fn get_selected_project_id(&self) -> Option<i64> {
+        let selected = self.project_dropdown.selected() as usize;
+        if selected == 0 {
+            None
+        } else {
+            self.projects.get(selected - 1).map(|p| p.id)
+        }
+    }
+
+    /// Sets the dropdown selection based on project_id
+    pub fn set_selected_project(&self, project_id: Option<i64>) {
+        match project_id {
+            None => self.project_dropdown.set_selected(0),
+            Some(id) => {
+                if let Some(index) = self.projects.iter().position(|p| p.id == id) {
+                    self.project_dropdown.set_selected((index + 1) as u32);
+                } else {
+                    self.project_dropdown.set_selected(0);
+                }
+            }
         }
     }
 
@@ -52,13 +83,15 @@ impl AppState {
     pub fn start_timer(&mut self) {
         let start_time = Utc::now();
         let description = self.description_entry.text().to_string();
-        match db::create_entry(&self.db_conn, None, &description, start_time) {
+        let project_id = self.get_selected_project_id();
+        match db::create_entry(&self.db_conn, project_id, &description, start_time) {
             Ok(entry) => {
                 self.running_entry = Some(entry);
                 self.update_button_appearance();
                 self.update_timer_display();
-                // Make description field non-editable while timer is running
+                // Make description field and project dropdown non-editable while timer is running
                 self.description_entry.set_sensitive(false);
+                self.project_dropdown.set_sensitive(false);
             }
             Err(e) => {
                 eprintln!("Failed to create time entry: {}", e);
@@ -78,6 +111,9 @@ impl AppState {
                     // Clear description field and make it editable again
                     self.description_entry.set_text("");
                     self.description_entry.set_sensitive(true);
+                    // Reset project dropdown to "No Project" and make it editable again
+                    self.project_dropdown.set_selected(0);
+                    self.project_dropdown.set_sensitive(true);
                 }
                 Err(e) => {
                     eprintln!("Failed to stop time entry: {}", e);
@@ -170,6 +206,79 @@ fn create_description_entry() -> gtk::Entry {
         .build()
 }
 
+/// Creates the project selector dropdown
+fn create_project_dropdown(projects: &[db::Project]) -> gtk::DropDown {
+    // Build the list of project names with "No Project" as first option
+    let mut labels: Vec<String> = vec!["No Project".to_string()];
+    for project in projects {
+        labels.push(project.name.clone());
+    }
+
+    let string_list = gtk::StringList::new(&labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+    let dropdown = gtk::DropDown::builder()
+        .model(&string_list)
+        .selected(0)
+        .margin_start(20)
+        .margin_end(20)
+        .margin_bottom(10)
+        .build();
+
+    // Set up a custom factory to show colored indicators for projects
+    let factory = gtk::SignalListItemFactory::new();
+    let projects_for_bind = projects.to_vec();
+
+    factory.connect_setup(|_, list_item| {
+        let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let color_indicator = gtk::Box::builder()
+            .width_request(12)
+            .height_request(12)
+            .valign(gtk::Align::Center)
+            .build();
+        let label = gtk::Label::new(None);
+        label.set_halign(gtk::Align::Start);
+        hbox.append(&color_indicator);
+        hbox.append(&label);
+        list_item.set_child(Some(&hbox));
+    });
+
+    factory.connect_bind(move |_, list_item| {
+        let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+        let item = list_item.item().and_downcast::<gtk::StringObject>().unwrap();
+        let text = item.string().to_string();
+
+        let hbox = list_item.child().and_downcast::<gtk::Box>().unwrap();
+        let color_indicator = hbox.first_child().and_downcast::<gtk::Box>().unwrap();
+        let label = hbox.last_child().and_downcast::<gtk::Label>().unwrap();
+
+        label.set_label(&text);
+
+        // Find the project by name and set color
+        if text == "No Project" {
+            // No color indicator for "No Project"
+            color_indicator.set_visible(false);
+        } else if let Some(project) = projects_for_bind.iter().find(|p| p.name == text) {
+            color_indicator.set_visible(true);
+            // Set the background color using inline CSS
+            let css_provider = gtk::CssProvider::new();
+            css_provider.load_from_string(&format!(
+                "box {{ background-color: {}; border-radius: 6px; }}",
+                project.color
+            ));
+            color_indicator.style_context().add_provider(
+                &css_provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        } else {
+            color_indicator.set_visible(false);
+        }
+    });
+
+    dropdown.set_factory(Some(&factory));
+    dropdown
+}
+
 /// Sets up the timer update callback that fires every second
 fn setup_timer_update(state: Rc<RefCell<AppState>>) {
     glib::timeout_add_seconds_local(1, move || {
@@ -191,20 +300,28 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     // Create the description entry field
     let description_entry = create_description_entry();
 
+    // Initialize database connection
+    let conn = db::init_db().expect("Failed to initialize database");
+
+    // Load projects from database
+    let projects = db::get_all_projects(&conn).unwrap_or_default();
+
+    // Create the project selector dropdown
+    let project_dropdown = create_project_dropdown(&projects);
+
     // Create the timer display label
     let timer_label = create_timer_label();
 
     // Create the start/stop button
     let start_stop_button = create_start_stop_button();
 
-    // Initialize database connection
-    let conn = db::init_db().expect("Failed to initialize database");
-
     // Create app state
     let state = Rc::new(RefCell::new(AppState::new(
         timer_label.clone(),
         start_stop_button.clone(),
         description_entry.clone(),
+        project_dropdown.clone(),
+        projects,
         conn,
     )));
 
@@ -213,6 +330,9 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         // Restore description text from running entry
         state.borrow().description_entry.set_text(&running_entry.description);
         state.borrow().description_entry.set_sensitive(false);
+        // Restore project selection from running entry
+        state.borrow().set_selected_project(running_entry.project_id);
+        state.borrow().project_dropdown.set_sensitive(false);
         state.borrow_mut().running_entry = Some(running_entry);
         state.borrow().update_button_appearance();
         state.borrow().update_timer_display();
@@ -233,6 +353,9 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
 
     // Add description entry at full width
     content.append(&description_entry);
+
+    // Add project dropdown below description
+    content.append(&project_dropdown);
 
     // Create timer section container
     let timer_section = gtk::Box::builder()

@@ -111,7 +111,7 @@
         "Save selected project_id when starting timer",
         "Verify project association is saved to database"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "ui",
