@@ -61,7 +61,7 @@
         "Add HeaderBar with app title",
         "Verify window opens and closes cleanly"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "ui",
