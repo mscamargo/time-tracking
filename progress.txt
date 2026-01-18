@@ -1,0 +1,12 @@
+# Ralph Progress Log
+
+This file tracks progress across Ralph loop iterations.
+Ralph appends to this file after each completed task.
+
+---
+
+## Session Start
+
+Starting fresh. See prd.json for task scope.
+
+---
