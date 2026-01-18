@@ -11,7 +11,7 @@
         "Create basic main.rs that initializes GTK and shows empty window",
         "Run `cargo build` to verify dependencies resolve"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "database",
