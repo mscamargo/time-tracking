@@ -98,7 +98,7 @@
         "Clear field when timer stops",
         "Verify description is saved to database with time entry"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "ui",

@@ -13,15 +13,22 @@ pub struct AppState {
     pub running_entry: Option<db::TimeEntry>,
     pub timer_label: gtk::Label,
     pub start_stop_button: gtk::Button,
+    pub description_entry: gtk::Entry,
     pub db_conn: Connection,
 }
 
 impl AppState {
-    pub fn new(timer_label: gtk::Label, start_stop_button: gtk::Button, db_conn: Connection) -> Self {
+    pub fn new(
+        timer_label: gtk::Label,
+        start_stop_button: gtk::Button,
+        description_entry: gtk::Entry,
+        db_conn: Connection,
+    ) -> Self {
         Self {
             running_entry: None,
             timer_label,
             start_stop_button,
+            description_entry,
             db_conn,
         }
     }
@@ -44,11 +51,14 @@ impl AppState {
     /// Starts a new time entry
     pub fn start_timer(&mut self) {
         let start_time = Utc::now();
-        match db::create_entry(&self.db_conn, None, "", start_time) {
+        let description = self.description_entry.text().to_string();
+        match db::create_entry(&self.db_conn, None, &description, start_time) {
             Ok(entry) => {
                 self.running_entry = Some(entry);
                 self.update_button_appearance();
                 self.update_timer_display();
+                // Make description field non-editable while timer is running
+                self.description_entry.set_sensitive(false);
             }
             Err(e) => {
                 eprintln!("Failed to create time entry: {}", e);
@@ -65,6 +75,9 @@ impl AppState {
                     self.running_entry = None;
                     self.update_button_appearance();
                     self.update_timer_display();
+                    // Clear description field and make it editable again
+                    self.description_entry.set_text("");
+                    self.description_entry.set_sensitive(true);
                 }
                 Err(e) => {
                     eprintln!("Failed to stop time entry: {}", e);
@@ -146,6 +159,17 @@ fn create_start_stop_button() -> gtk::Button {
         .build()
 }
 
+/// Creates the description entry field
+fn create_description_entry() -> gtk::Entry {
+    gtk::Entry::builder()
+        .placeholder_text("What are you working on?")
+        .margin_start(20)
+        .margin_end(20)
+        .margin_top(20)
+        .margin_bottom(10)
+        .build()
+}
+
 /// Sets up the timer update callback that fires every second
 fn setup_timer_update(state: Rc<RefCell<AppState>>) {
     glib::timeout_add_seconds_local(1, move || {
@@ -164,6 +188,9 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         .title_widget(&adw::WindowTitle::new("Time Tracking", ""))
         .build();
 
+    // Create the description entry field
+    let description_entry = create_description_entry();
+
     // Create the timer display label
     let timer_label = create_timer_label();
 
@@ -177,11 +204,15 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     let state = Rc::new(RefCell::new(AppState::new(
         timer_label.clone(),
         start_stop_button.clone(),
+        description_entry.clone(),
         conn,
     )));
 
     // Check for running entry from database and restore state
     if let Ok(Some(running_entry)) = db::get_running_entry(&state.borrow().db_conn) {
+        // Restore description text from running entry
+        state.borrow().description_entry.set_text(&running_entry.description);
+        state.borrow().description_entry.set_sensitive(false);
         state.borrow_mut().running_entry = Some(running_entry);
         state.borrow().update_button_appearance();
         state.borrow().update_timer_display();
@@ -199,6 +230,9 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     // Create a vertical box to hold the header bar and content
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&header_bar);
+
+    // Add description entry at full width
+    content.append(&description_entry);
 
     // Create timer section container
     let timer_section = gtk::Box::builder()
