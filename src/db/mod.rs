@@ -1,6 +1,16 @@
-use rusqlite::{Connection, Result};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, Result, params};
 use std::fs;
 use std::path::PathBuf;
+
+/// Represents a project in the time tracking system
+#[derive(Debug, Clone, PartialEq)]
+pub struct Project {
+    pub id: i64,
+    pub name: String,
+    pub color: String,
+    pub created_at: DateTime<Utc>,
+}
 
 /// Returns the path to the database file in XDG data directory
 pub fn get_db_path() -> PathBuf {
@@ -48,6 +58,63 @@ fn create_tables(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    Ok(())
+}
+
+/// Creates a new project with the given name and color
+pub fn create_project(conn: &Connection, name: &str, color: &str) -> Result<Project> {
+    conn.execute(
+        "INSERT INTO projects (name, color) VALUES (?1, ?2)",
+        params![name, color],
+    )?;
+
+    let id = conn.last_insert_rowid();
+
+    conn.query_row(
+        "SELECT id, name, color, created_at FROM projects WHERE id = ?1",
+        params![id],
+        |row| {
+            let created_at_str: String = row.get(3)?;
+            let created_at = DateTime::parse_from_rfc3339(&format!("{}Z", created_at_str.replace(' ', "T")))
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            Ok(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                color: row.get(2)?,
+                created_at,
+            })
+        },
+    )
+}
+
+/// Retrieves all projects from the database
+pub fn get_all_projects(conn: &Connection) -> Result<Vec<Project>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, color, created_at FROM projects ORDER BY name"
+    )?;
+
+    let projects = stmt.query_map([], |row| {
+        let created_at_str: String = row.get(3)?;
+        let created_at = DateTime::parse_from_rfc3339(&format!("{}Z", created_at_str.replace(' ', "T")))
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        Ok(Project {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            color: row.get(2)?,
+            created_at,
+        })
+    })?;
+
+    projects.collect()
+}
+
+/// Deletes a project by ID
+pub fn delete_project(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
     Ok(())
 }
 
@@ -167,5 +234,64 @@ mod tests {
             .unwrap();
 
         assert!(project_id.is_none());
+    }
+
+    #[test]
+    fn test_create_project() {
+        let conn = create_test_db();
+
+        let project = create_project(&conn, "Work", "#3498db").unwrap();
+
+        assert_eq!(project.id, 1);
+        assert_eq!(project.name, "Work");
+        assert_eq!(project.color, "#3498db");
+    }
+
+    #[test]
+    fn test_get_all_projects_empty() {
+        let conn = create_test_db();
+
+        let projects = get_all_projects(&conn).unwrap();
+
+        assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_projects() {
+        let conn = create_test_db();
+
+        create_project(&conn, "Work", "#3498db").unwrap();
+        create_project(&conn, "Personal", "#e74c3c").unwrap();
+        create_project(&conn, "Learning", "#2ecc71").unwrap();
+
+        let projects = get_all_projects(&conn).unwrap();
+
+        assert_eq!(projects.len(), 3);
+        // Projects should be ordered by name
+        assert_eq!(projects[0].name, "Learning");
+        assert_eq!(projects[1].name, "Personal");
+        assert_eq!(projects[2].name, "Work");
+    }
+
+    #[test]
+    fn test_delete_project() {
+        let conn = create_test_db();
+
+        let project = create_project(&conn, "Work", "#3498db").unwrap();
+        assert_eq!(get_all_projects(&conn).unwrap().len(), 1);
+
+        delete_project(&conn, project.id).unwrap();
+
+        let projects = get_all_projects(&conn).unwrap();
+        assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn test_delete_nonexistent_project() {
+        let conn = create_test_db();
+
+        // Deleting a non-existent project should not error
+        let result = delete_project(&conn, 999);
+        assert!(result.is_ok());
     }
 }
