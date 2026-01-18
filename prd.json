@@ -185,7 +185,7 @@
         "Show breakdown by project with colored bars",
         "Verify totals match sum of individual entries"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "polish",

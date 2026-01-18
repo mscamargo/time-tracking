@@ -1,12 +1,20 @@
 use adw::prelude::*;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Utc, Weekday};
 use gtk4 as gtk;
 use gtk4::glib;
 use rusqlite::Connection;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::db;
+
+/// View mode for the entries list
+#[derive(Clone, Copy, PartialEq)]
+pub enum ViewMode {
+    Today,
+    Week,
+}
 
 /// Application state for managing timer
 pub struct AppState {
@@ -20,6 +28,9 @@ pub struct AppState {
     pub entries_list_box: gtk::ListBox,
     pub day_total_label: gtk::Label,
     pub window: Option<adw::ApplicationWindow>,
+    pub view_mode: ViewMode,
+    pub view_toggle: gtk::Box,
+    pub entries_section: gtk::Box,
 }
 
 impl AppState {
@@ -32,6 +43,8 @@ impl AppState {
         db_conn: Connection,
         entries_list_box: gtk::ListBox,
         day_total_label: gtk::Label,
+        view_toggle: gtk::Box,
+        entries_section: gtk::Box,
     ) -> Self {
         Self {
             running_entry: None,
@@ -44,6 +57,9 @@ impl AppState {
             entries_list_box,
             day_total_label,
             window: None,
+            view_mode: ViewMode::Today,
+            view_toggle,
+            entries_section,
         }
     }
 
@@ -318,6 +334,37 @@ fn apply_css_styles() {
             min-height: 16px;
             border-radius: 4px;
         }
+        .view-toggle {
+            border-radius: 6px;
+            padding: 2px;
+        }
+        .view-toggle-button {
+            padding: 6px 12px;
+            border-radius: 4px;
+            min-height: 0;
+        }
+        .view-toggle-button:checked {
+            background-color: @accent_bg_color;
+            color: @accent_fg_color;
+        }
+        .project-bar {
+            min-height: 8px;
+            border-radius: 4px;
+        }
+        .weekly-summary {
+            padding: 12px;
+        }
+        .weekly-total {
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+        .day-section {
+            margin-bottom: 8px;
+        }
+        .day-section-header {
+            padding: 8px 12px;
+            background-color: alpha(@window_bg_color, 0.3);
+        }
         "#,
     );
 
@@ -429,6 +476,164 @@ fn create_project_dropdown(projects: &[db::Project]) -> gtk::DropDown {
 
     dropdown.set_factory(Some(&factory));
     dropdown
+}
+
+/// Creates the view toggle (Today/Week) button group
+fn create_view_toggle() -> gtk::Box {
+    let toggle_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .halign(gtk::Align::Center)
+        .css_classes(["linked", "view-toggle"])
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
+
+    let today_button = gtk::ToggleButton::builder()
+        .label("Today")
+        .active(true)
+        .css_classes(["view-toggle-button"])
+        .build();
+
+    let week_button = gtk::ToggleButton::builder()
+        .label("Week")
+        .css_classes(["view-toggle-button"])
+        .build();
+
+    // Link the toggle buttons together
+    week_button.set_group(Some(&today_button));
+
+    toggle_box.append(&today_button);
+    toggle_box.append(&week_button);
+
+    toggle_box
+}
+
+/// Gets the start and end dates for the current week (Monday to Sunday)
+fn get_current_week_range() -> (NaiveDate, NaiveDate) {
+    let today = Local::now().date_naive();
+    let weekday = today.weekday();
+    let days_since_monday = weekday.num_days_from_monday();
+    let monday = today - chrono::Duration::days(days_since_monday as i64);
+    let sunday = monday + chrono::Duration::days(6);
+    (monday, sunday)
+}
+
+/// Formats duration in seconds to HH:MM:SS string
+fn format_duration(total_seconds: i64) -> String {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+}
+
+/// Calculates total duration for a list of entries
+fn calculate_entries_duration(entries: &[db::TimeEntry]) -> i64 {
+    let mut total_seconds: i64 = 0;
+    for entry in entries {
+        let end = entry.end_time.unwrap_or_else(Utc::now);
+        let duration = end.signed_duration_since(entry.start_time).num_seconds().max(0);
+        total_seconds += duration;
+    }
+    total_seconds
+}
+
+/// Creates the project breakdown bar chart for the weekly summary
+fn create_project_breakdown(
+    entries: &[db::TimeEntry],
+    conn: &Connection,
+) -> gtk::Box {
+    let breakdown_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(12)
+        .build();
+
+    // Calculate time per project
+    let mut project_times: HashMap<Option<i64>, i64> = HashMap::new();
+    let mut project_info: HashMap<Option<i64>, (String, String)> = HashMap::new(); // (name, color)
+
+    for entry in entries {
+        let end = entry.end_time.unwrap_or_else(Utc::now);
+        let duration = end.signed_duration_since(entry.start_time).num_seconds().max(0);
+        *project_times.entry(entry.project_id).or_insert(0) += duration;
+
+        // Cache project info
+        if !project_info.contains_key(&entry.project_id) {
+            let (name, color) = if let Some(pid) = entry.project_id {
+                if let Ok(Some(project)) = db::get_project_by_id(conn, pid) {
+                    (project.name, project.color)
+                } else {
+                    ("No Project".to_string(), "#888888".to_string())
+                }
+            } else {
+                ("No Project".to_string(), "#888888".to_string())
+            };
+            project_info.insert(entry.project_id, (name, color));
+        }
+    }
+
+    if project_times.is_empty() {
+        return breakdown_box;
+    }
+
+    // Find max time for scaling
+    let max_time = project_times.values().copied().max().unwrap_or(1) as f64;
+
+    // Sort by time (descending)
+    let mut sorted_projects: Vec<_> = project_times.into_iter().collect();
+    sorted_projects.sort_by(|a, b| b.1.cmp(&a.1));
+
+    for (project_id, duration) in sorted_projects {
+        let (name, color) = project_info.get(&project_id).unwrap();
+
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+
+        // Project name label
+        let name_label = gtk::Label::builder()
+            .label(name)
+            .halign(gtk::Align::Start)
+            .width_chars(15)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        row.append(&name_label);
+
+        // Color bar (proportional width)
+        let bar_width = ((duration as f64 / max_time) * 150.0).max(10.0) as i32;
+        let bar = gtk::Box::builder()
+            .width_request(bar_width)
+            .height_request(8)
+            .valign(gtk::Align::Center)
+            .css_classes(["project-bar"])
+            .build();
+
+        let css_provider = gtk::CssProvider::new();
+        css_provider.load_from_string(&format!(
+            "box {{ background-color: {}; }}",
+            color
+        ));
+        bar.style_context().add_provider(
+            &css_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        row.append(&bar);
+
+        // Duration label
+        let duration_label = gtk::Label::builder()
+            .label(&format_duration(duration))
+            .halign(gtk::Align::End)
+            .hexpand(true)
+            .css_classes(["monospace", "dim-label"])
+            .build();
+        row.append(&duration_label);
+
+        breakdown_box.append(&row);
+    }
+
+    breakdown_box
 }
 
 /// Sets up the timer update callback that fires every second
@@ -703,6 +908,292 @@ fn refresh_entries_list_with_actions(state: Rc<RefCell<AppState>>, window: &adw:
             let row = create_entry_row_with_actions(&entry, state.clone(), window);
             state.borrow().entries_list_box.append(&row);
         }
+    }
+}
+
+/// Refreshes the entries section for weekly view
+fn refresh_weekly_view(state: Rc<RefCell<AppState>>, window: &adw::ApplicationWindow) {
+    let state_borrow = state.borrow();
+
+    // Clear the entries section
+    let entries_section = &state_borrow.entries_section;
+    while let Some(child) = entries_section.first_child() {
+        entries_section.remove(&child);
+    }
+
+    // Get entries for the current week
+    let (week_start, week_end) = get_current_week_range();
+    let all_entries = db::get_entries_for_date_range(&state_borrow.db_conn, week_start, week_end)
+        .unwrap_or_default();
+
+    // Calculate weekly total
+    let weekly_total_seconds = calculate_entries_duration(&all_entries);
+
+    // Create header with weekly total
+    let header_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .css_classes(["weekly-summary"])
+        .build();
+
+    let week_label = gtk::Label::builder()
+        .label(&format!(
+            "Week of {} - {}",
+            week_start.format("%b %d"),
+            week_end.format("%b %d, %Y")
+        ))
+        .halign(gtk::Align::Start)
+        .css_classes(["title-4"])
+        .build();
+    header_box.append(&week_label);
+
+    let total_label = gtk::Label::builder()
+        .label(&format!("Total: {}", format_duration(weekly_total_seconds)))
+        .halign(gtk::Align::Start)
+        .css_classes(["weekly-total", "monospace"])
+        .build();
+    header_box.append(&total_label);
+
+    // Add project breakdown
+    let breakdown = create_project_breakdown(&all_entries, &state_borrow.db_conn);
+    header_box.append(&breakdown);
+
+    entries_section.append(&header_box);
+
+    // Add separator
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.set_margin_top(8);
+    entries_section.append(&separator);
+
+    // Create scrolled window for day sections
+    let scrolled_window = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .build();
+
+    let days_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(0)
+        .build();
+
+    // Group entries by day
+    let mut entries_by_day: HashMap<NaiveDate, Vec<db::TimeEntry>> = HashMap::new();
+    for entry in all_entries {
+        let date = entry.start_time.with_timezone(&Local).date_naive();
+        entries_by_day.entry(date).or_default().push(entry);
+    }
+
+    // Sort days (most recent first)
+    let mut days: Vec<_> = entries_by_day.keys().cloned().collect();
+    days.sort_by(|a, b| b.cmp(a));
+
+    if days.is_empty() {
+        let empty_label = gtk::Label::builder()
+            .label("No entries this week")
+            .css_classes(["dim-label"])
+            .margin_top(20)
+            .margin_bottom(20)
+            .build();
+        days_box.append(&empty_label);
+    } else {
+        // Need to drop the borrow to create rows with state reference
+        let conn_ref = &state_borrow.db_conn;
+
+        for day in &days {
+            let day_entries = entries_by_day.get(day).unwrap();
+            let day_total = calculate_entries_duration(day_entries);
+
+            // Day header
+            let day_header = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(8)
+                .css_classes(["day-section-header"])
+                .build();
+
+            let day_name = gtk::Label::builder()
+                .label(&day.format("%A, %B %d").to_string())
+                .halign(gtk::Align::Start)
+                .hexpand(true)
+                .css_classes(["heading"])
+                .build();
+            day_header.append(&day_name);
+
+            let day_total_label = gtk::Label::builder()
+                .label(&format_duration(day_total))
+                .halign(gtk::Align::End)
+                .css_classes(["monospace"])
+                .build();
+            day_header.append(&day_total_label);
+
+            days_box.append(&day_header);
+
+            // Day entries list
+            let day_list = gtk::ListBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .css_classes(["boxed-list"])
+                .margin_start(12)
+                .margin_end(12)
+                .margin_bottom(8)
+                .build();
+
+            for entry in day_entries {
+                let row = create_entry_row_compact(entry, conn_ref);
+                day_list.append(&row);
+            }
+
+            days_box.append(&day_list);
+        }
+    }
+
+    scrolled_window.set_child(Some(&days_box));
+    entries_section.append(&scrolled_window);
+}
+
+/// Creates a compact entry row for weekly view (no action buttons)
+fn create_entry_row_compact(entry: &db::TimeEntry, conn: &Connection) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::builder()
+        .selectable(false)
+        .activatable(false)
+        .build();
+
+    let hbox = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+
+    // Project color indicator
+    let color_box = gtk::Box::builder()
+        .width_request(4)
+        .valign(gtk::Align::Fill)
+        .build();
+
+    if let Some(project_id) = entry.project_id {
+        if let Ok(Some(project)) = db::get_project_by_id(conn, project_id) {
+            let css_provider = gtk::CssProvider::new();
+            css_provider.load_from_string(&format!(
+                "box {{ background-color: {}; border-radius: 2px; }}",
+                project.color
+            ));
+            color_box.style_context().add_provider(
+                &css_provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    }
+    hbox.append(&color_box);
+
+    // Description
+    let description = if entry.description.is_empty() {
+        "(no description)".to_string()
+    } else {
+        entry.description.clone()
+    };
+
+    let desc_label = gtk::Label::builder()
+        .label(&description)
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
+    hbox.append(&desc_label);
+
+    // Duration
+    let end = entry.end_time.unwrap_or_else(Utc::now);
+    let duration_secs = end.signed_duration_since(entry.start_time).num_seconds().max(0);
+    let duration_label = gtk::Label::builder()
+        .label(&format_duration(duration_secs))
+        .halign(gtk::Align::End)
+        .css_classes(["monospace", "dim-label"])
+        .build();
+    hbox.append(&duration_label);
+
+    row.set_child(Some(&hbox));
+    row
+}
+
+/// Refreshes the view based on the current view mode
+fn refresh_view(state: Rc<RefCell<AppState>>, window: &adw::ApplicationWindow) {
+    let view_mode = state.borrow().view_mode;
+    match view_mode {
+        ViewMode::Today => refresh_today_view(state, window),
+        ViewMode::Week => refresh_weekly_view(state, window),
+    }
+}
+
+/// Refreshes the entries section for today view (similar to original but with view toggle support)
+fn refresh_today_view(state: Rc<RefCell<AppState>>, window: &adw::ApplicationWindow) {
+    let state_borrow = state.borrow();
+
+    // Clear the entries section
+    let entries_section = &state_borrow.entries_section;
+    while let Some(child) = entries_section.first_child() {
+        entries_section.remove(&child);
+    }
+
+    // Recreate the day total label and entries list
+    let today = Local::now().date_naive();
+    let entries = db::get_entries_for_date(&state_borrow.db_conn, today).unwrap_or_default();
+
+    // Calculate total time for the day
+    let total_seconds = calculate_entries_duration(&entries);
+
+    // Add day header label
+    let today_formatted = today.format("%A, %B %d").to_string();
+    let total_str = format_duration(total_seconds);
+
+    let day_total_label = gtk::Label::builder()
+        .use_markup(true)
+        .halign(gtk::Align::Start)
+        .css_classes(["day-header"])
+        .label(&format!("<b>{}</b>  •  Total: {}", today_formatted, total_str))
+        .build();
+    entries_section.append(&day_total_label);
+
+    // Update the original day_total_label reference too
+    state_borrow.day_total_label.set_markup(&format!(
+        "<b>{}</b>  •  Total: {}",
+        today_formatted,
+        total_str
+    ));
+
+    // Create scrollable window for entries list
+    let scrolled_window = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .build();
+
+    let entries_list_box = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+
+    if entries.is_empty() {
+        let empty_label = gtk::Label::builder()
+            .label("No entries for today")
+            .css_classes(["dim-label"])
+            .margin_top(20)
+            .margin_bottom(20)
+            .build();
+        entries_list_box.append(&empty_label);
+        scrolled_window.set_child(Some(&entries_list_box));
+        entries_section.append(&scrolled_window);
+    } else {
+        // Need to drop the borrow to create rows with state reference
+        drop(state_borrow);
+
+        // Add entry rows with actions
+        for entry in entries {
+            let row = create_entry_row_with_actions(&entry, state.clone(), window);
+            entries_list_box.append(&row);
+        }
+        scrolled_window.set_child(Some(&entries_list_box));
+        state.borrow().entries_section.append(&scrolled_window);
     }
 }
 
@@ -1100,6 +1591,16 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         .css_classes(["day-header"])
         .build();
 
+    // Create the view toggle (Today/Week)
+    let view_toggle = create_view_toggle();
+
+    // Create entries section with header and scrollable list
+    let entries_section = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(0)
+        .vexpand(true)
+        .build();
+
     // Create app state
     let state = Rc::new(RefCell::new(AppState::new(
         timer_label.clone(),
@@ -1110,6 +1611,8 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         conn,
         entries_list_box.clone(),
         day_total_label.clone(),
+        view_toggle.clone(),
+        entries_section.clone(),
     )));
 
     // Check for running entry from database and restore state
@@ -1150,31 +1653,15 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
 
     content.append(&timer_section);
 
-    // Add separator between timer and entries list
+    // Add separator between timer and view toggle
     let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
     separator.set_margin_top(10);
     content.append(&separator);
 
-    // Create entries section with header and scrollable list
-    let entries_section = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(0)
-        .vexpand(true)
-        .build();
+    // Add view toggle
+    content.append(&view_toggle);
 
-    // Add day header label
-    entries_section.append(&day_total_label);
-
-    // Create scrollable window for entries list
-    let scrolled_window = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vscrollbar_policy(gtk::PolicyType::Automatic)
-        .vexpand(true)
-        .build();
-
-    scrolled_window.set_child(Some(&entries_list_box));
-    entries_section.append(&scrolled_window);
-
+    // Add entries section
     content.append(&entries_section);
 
     // Create the main window with Adwaita styling
@@ -1194,7 +1681,7 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     let window_for_button = window.clone();
     start_stop_button.connect_clicked(move |_| {
         if state_for_button.borrow_mut().toggle_timer() {
-            refresh_entries_list_with_actions(state_for_button.clone(), &window_for_button);
+            refresh_view(state_for_button.clone(), &window_for_button);
         }
     });
 
@@ -1211,8 +1698,30 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         show_shortcuts_dialog(&window_for_help);
     });
 
-    // Initial load of today's entries with action buttons
-    refresh_entries_list_with_actions(state.clone(), &window);
+    // Connect view toggle buttons
+    let today_button = view_toggle.first_child().and_downcast::<gtk::ToggleButton>().unwrap();
+    let week_button = view_toggle.last_child().and_downcast::<gtk::ToggleButton>().unwrap();
+
+    let state_for_today = state.clone();
+    let window_for_today = window.clone();
+    today_button.connect_toggled(move |button| {
+        if button.is_active() {
+            state_for_today.borrow_mut().view_mode = ViewMode::Today;
+            refresh_view(state_for_today.clone(), &window_for_today);
+        }
+    });
+
+    let state_for_week = state.clone();
+    let window_for_week = window.clone();
+    week_button.connect_toggled(move |button| {
+        if button.is_active() {
+            state_for_week.borrow_mut().view_mode = ViewMode::Week;
+            refresh_view(state_for_week.clone(), &window_for_week);
+        }
+    });
+
+    // Initial load of today's entries
+    refresh_view(state.clone(), &window);
 
     // Set up keyboard shortcuts
     setup_keyboard_shortcuts(&window, state.clone(), &description_entry, &project_dropdown);
@@ -1261,14 +1770,14 @@ fn setup_keyboard_shortcuts(
             // Ctrl+S: Start/Stop timer
             gtk::gdk::Key::s if ctrl => {
                 if state_for_key.borrow_mut().toggle_timer() {
-                    refresh_entries_list_with_actions(state_for_key.clone(), &window_for_key);
+                    refresh_view(state_for_key.clone(), &window_for_key);
                 }
                 glib::Propagation::Stop
             }
             // Space: Start/Stop timer (only if not focused on text entry)
             gtk::gdk::Key::space if !description_entry_for_key.has_focus() => {
                 if state_for_key.borrow_mut().toggle_timer() {
-                    refresh_entries_list_with_actions(state_for_key.clone(), &window_for_key);
+                    refresh_view(state_for_key.clone(), &window_for_key);
                 }
                 glib::Propagation::Stop
             }
@@ -1287,7 +1796,7 @@ fn setup_keyboard_shortcuts(
             gtk::gdk::Key::Escape => {
                 if state_for_key.borrow().running_entry.is_some() {
                     if state_for_key.borrow_mut().stop_timer() {
-                        refresh_entries_list_with_actions(state_for_key.clone(), &window_for_key);
+                        refresh_view(state_for_key.clone(), &window_for_key);
                     }
                 }
                 glib::Propagation::Stop

@@ -244,6 +244,40 @@ pub fn get_entries_for_date(conn: &Connection, date: NaiveDate) -> Result<Vec<Ti
     entries.collect()
 }
 
+/// Gets all time entries for a date range (inclusive)
+pub fn get_entries_for_date_range(
+    conn: &Connection,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Vec<TimeEntry>> {
+    let start_date_str = start_date.format("%Y-%m-%d").to_string();
+    let end_date_str = end_date.format("%Y-%m-%d").to_string();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, description, start_time, end_time, created_at
+         FROM time_entries
+         WHERE date(start_time) >= ?1 AND date(start_time) <= ?2
+         ORDER BY start_time DESC"
+    )?;
+
+    let entries = stmt.query_map(params![start_date_str, end_date_str], |row| {
+        let start_time_str: String = row.get(3)?;
+        let end_time_str: Option<String> = row.get(4)?;
+        let created_at_str: String = row.get(5)?;
+
+        Ok(TimeEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            description: row.get(2)?,
+            start_time: parse_datetime(&start_time_str),
+            end_time: end_time_str.map(|s| parse_datetime(&s)),
+            created_at: parse_datetime(&created_at_str),
+        })
+    })?;
+
+    entries.collect()
+}
+
 /// Deletes a time entry by ID
 pub fn delete_entry(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM time_entries WHERE id = ?1", params![id])?;
@@ -622,5 +656,50 @@ mod tests {
         let found = get_project_by_id(&conn, 999).unwrap();
 
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_get_entries_for_date_range() {
+        let conn = create_test_db();
+
+        // Create entries for different dates
+        let now = Utc::now();
+        create_entry(&conn, None, "Today's task", now).unwrap();
+
+        // Manually insert entries for specific dates
+        conn.execute(
+            "INSERT INTO time_entries (project_id, description, start_time) VALUES (NULL, 'Monday task', '2024-01-15 10:00:00')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO time_entries (project_id, description, start_time) VALUES (NULL, 'Wednesday task', '2024-01-17 10:00:00')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO time_entries (project_id, description, start_time) VALUES (NULL, 'Outside range', '2024-01-20 10:00:00')",
+            [],
+        ).unwrap();
+
+        let start = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 1, 17).unwrap();
+        let entries = get_entries_for_date_range(&conn, start, end).unwrap();
+
+        // Should get Monday and Wednesday tasks, not the one outside the range
+        assert_eq!(entries.len(), 2);
+        let descriptions: Vec<&str> = entries.iter().map(|e| e.description.as_str()).collect();
+        assert!(descriptions.contains(&"Monday task"));
+        assert!(descriptions.contains(&"Wednesday task"));
+        assert!(!descriptions.contains(&"Outside range"));
+    }
+
+    #[test]
+    fn test_get_entries_for_date_range_empty() {
+        let conn = create_test_db();
+
+        let start = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 1, 21).unwrap();
+        let entries = get_entries_for_date_range(&conn, start, end).unwrap();
+
+        assert!(entries.is_empty());
     }
 }
