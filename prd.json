@@ -160,7 +160,7 @@
         "Update UI to show running state with description and project",
         "Verify closing and reopening app continues the same timer"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

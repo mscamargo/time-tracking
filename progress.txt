@@ -348,3 +348,21 @@ Starting fresh. See prd.json for task scope.
 - prd.json (marked task 12 as passes: true)
 
 ---
+
+## Task 13: Persist and restore running timer on app restart
+
+**Status:** COMPLETED (already implemented)
+
+**What was done:**
+- Reviewed existing code and found Task 13 was already fully implemented but not marked as complete
+- The implementation at `src/ui/mod.rs:1108-1119` already handles:
+  - On app start, checking for running entry via `db::get_running_entry()` (which queries for entries with NULL end_time)
+  - If found, restoring timer state with correct elapsed time via `update_timer_display()`
+  - Updating UI to show running state with description, project selection, and disabled input fields
+  - The timer correctly continues counting from the original start_time when the app is reopened
+- Marked task 13 as passes: true in prd.json since implementation was already complete
+
+**Files modified:**
+- prd.json (marked task 13 as passes: true)
+
+---
