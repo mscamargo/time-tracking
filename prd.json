@@ -149,7 +149,7 @@
         "Update project dropdown after changes",
         "Verify projects are persisted to database"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

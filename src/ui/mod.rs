@@ -208,6 +208,73 @@ impl AppState {
         true
     }
 
+    /// Refreshes the project dropdown with current projects from database
+    pub fn refresh_projects(&mut self) {
+        // Reload projects from database
+        self.projects = db::get_all_projects(&self.db_conn).unwrap_or_default();
+
+        // Build the list of project names with "No Project" as first option
+        let mut labels: Vec<String> = vec!["No Project".to_string()];
+        for project in &self.projects {
+            labels.push(project.name.clone());
+        }
+
+        let string_list = gtk::StringList::new(&labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        self.project_dropdown.set_model(Some(&string_list));
+
+        // Set up a custom factory to show colored indicators for projects
+        let factory = gtk::SignalListItemFactory::new();
+        let projects_for_bind = self.projects.clone();
+
+        factory.connect_setup(|_, list_item| {
+            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+            let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let color_indicator = gtk::Box::builder()
+                .width_request(12)
+                .height_request(12)
+                .valign(gtk::Align::Center)
+                .build();
+            let label = gtk::Label::new(None);
+            label.set_halign(gtk::Align::Start);
+            hbox.append(&color_indicator);
+            hbox.append(&label);
+            list_item.set_child(Some(&hbox));
+        });
+
+        factory.connect_bind(move |_, list_item| {
+            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+            let item = list_item.item().and_downcast::<gtk::StringObject>().unwrap();
+            let text = item.string().to_string();
+
+            let hbox = list_item.child().and_downcast::<gtk::Box>().unwrap();
+            let color_indicator = hbox.first_child().and_downcast::<gtk::Box>().unwrap();
+            let label = hbox.last_child().and_downcast::<gtk::Label>().unwrap();
+
+            label.set_label(&text);
+
+            // Find the project by name and set color
+            if text == "No Project" {
+                color_indicator.set_visible(false);
+            } else if let Some(project) = projects_for_bind.iter().find(|p| p.name == text) {
+                color_indicator.set_visible(true);
+                let css_provider = gtk::CssProvider::new();
+                css_provider.load_from_string(&format!(
+                    "box {{ background-color: {}; border-radius: 6px; }}",
+                    project.color
+                ));
+                color_indicator.style_context().add_provider(
+                    &css_provider,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
+            } else {
+                color_indicator.set_visible(false);
+            }
+        });
+
+        self.project_dropdown.set_factory(Some(&factory));
+        self.project_dropdown.set_selected(0);
+    }
+
 }
 
 /// Applies CSS styles for the application
@@ -236,6 +303,20 @@ fn apply_css_styles() {
             min-width: 28px;
             min-height: 28px;
             padding: 4px;
+        }
+        .project-color-button {
+            min-width: 32px;
+            min-height: 32px;
+            border-radius: 6px;
+            padding: 0;
+        }
+        .project-row {
+            padding: 8px 12px;
+        }
+        .project-color-indicator {
+            min-width: 16px;
+            min-height: 16px;
+            border-radius: 4px;
         }
         "#,
     );
@@ -625,6 +706,345 @@ fn refresh_entries_list_with_actions(state: Rc<RefCell<AppState>>, window: &adw:
     }
 }
 
+/// Default project colors for the color picker
+const PROJECT_COLORS: &[&str] = &[
+    "#3498db", // Blue
+    "#e74c3c", // Red
+    "#2ecc71", // Green
+    "#f39c12", // Orange
+    "#9b59b6", // Purple
+    "#1abc9c", // Teal
+    "#e91e63", // Pink
+    "#607d8b", // Blue Grey
+];
+
+/// Creates a row for a project in the project management dialog
+fn create_project_row(
+    project: &db::Project,
+    state: Rc<RefCell<AppState>>,
+    projects_list_box: &gtk::ListBox,
+    window: &adw::ApplicationWindow,
+) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::builder()
+        .selectable(false)
+        .activatable(false)
+        .css_classes(["project-row"])
+        .build();
+
+    let hbox = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .build();
+
+    // Color indicator
+    let color_box = gtk::Box::builder()
+        .width_request(16)
+        .height_request(16)
+        .valign(gtk::Align::Center)
+        .css_classes(["project-color-indicator"])
+        .build();
+
+    let css_provider = gtk::CssProvider::new();
+    css_provider.load_from_string(&format!(
+        "box {{ background-color: {}; }}",
+        project.color
+    ));
+    color_box.style_context().add_provider(
+        &css_provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
+    hbox.append(&color_box);
+
+    // Project name label
+    let name_label = gtk::Label::builder()
+        .label(&project.name)
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    hbox.append(&name_label);
+
+    // Delete button
+    let delete_button = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Delete project")
+        .css_classes(["flat", "entry-action-button"])
+        .build();
+
+    let project_id = project.id;
+    let project_name = project.name.clone();
+    let state_for_delete = state.clone();
+    let projects_list_box_clone = projects_list_box.clone();
+    let window_clone = window.clone();
+
+    delete_button.connect_clicked(move |_| {
+        // Create confirmation dialog
+        let dialog = adw::MessageDialog::builder()
+            .transient_for(&window_clone)
+            .heading("Delete Project?")
+            .body(format!(
+                "Are you sure you want to delete \"{}\"? Time entries will keep their descriptions but lose their project association.",
+                project_name
+            ))
+            .build();
+
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let state_for_response = state_for_delete.clone();
+        let projects_list_box_for_response = projects_list_box_clone.clone();
+        dialog.connect_response(None, move |dialog, response| {
+            if response == "delete" {
+                if let Err(e) = db::delete_project(&state_for_response.borrow().db_conn, project_id) {
+                    eprintln!("Failed to delete project: {}", e);
+                } else {
+                    // Refresh the projects list in the dialog
+                    refresh_projects_list(&state_for_response, &projects_list_box_for_response);
+                    // Refresh the project dropdown in the main window
+                    state_for_response.borrow_mut().refresh_projects();
+                }
+            }
+            dialog.close();
+        });
+
+        dialog.present();
+    });
+
+    hbox.append(&delete_button);
+
+    row.set_child(Some(&hbox));
+    row
+}
+
+/// Refreshes the projects list in the project management dialog
+fn refresh_projects_list(state: &Rc<RefCell<AppState>>, projects_list_box: &gtk::ListBox) {
+    // Remove all existing rows
+    while let Some(child) = projects_list_box.first_child() {
+        projects_list_box.remove(&child);
+    }
+
+    // Reload projects from database
+    let projects = db::get_all_projects(&state.borrow().db_conn).unwrap_or_default();
+
+    if projects.is_empty() {
+        // Show empty state
+        let empty_label = gtk::Label::builder()
+            .label("No projects yet. Create one above!")
+            .css_classes(["dim-label"])
+            .margin_top(20)
+            .margin_bottom(20)
+            .build();
+        projects_list_box.append(&empty_label);
+    } else {
+        // Add project rows
+        if let Some(ref window) = state.borrow().window {
+            for project in projects {
+                let row = create_project_row(&project, state.clone(), projects_list_box, window);
+                projects_list_box.append(&row);
+            }
+        }
+    }
+}
+
+/// Shows the project management dialog
+fn show_projects_dialog(state: Rc<RefCell<AppState>>, parent: &adw::ApplicationWindow) {
+    let dialog = adw::Dialog::builder()
+        .title("Manage Projects")
+        .content_width(350)
+        .content_height(450)
+        .build();
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(0)
+        .build();
+
+    // Header bar for the dialog
+    let header_bar = adw::HeaderBar::builder()
+        .show_end_title_buttons(true)
+        .title_widget(&adw::WindowTitle::new("Manage Projects", ""))
+        .build();
+    content.append(&header_bar);
+
+    // Create new project section
+    let new_project_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(12)
+        .margin_bottom(12)
+        .build();
+
+    // Color picker button
+    let selected_color = Rc::new(RefCell::new(PROJECT_COLORS[0].to_string()));
+    let color_button = gtk::Button::builder()
+        .css_classes(["project-color-button"])
+        .tooltip_text("Select color")
+        .build();
+
+    // Set initial color on button
+    let initial_css = gtk::CssProvider::new();
+    initial_css.load_from_string(&format!(
+        "button {{ background-color: {}; }}",
+        selected_color.borrow()
+    ));
+    color_button.style_context().add_provider(
+        &initial_css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
+    // Color picker popover
+    let color_popover = gtk::Popover::new();
+    let colors_grid = gtk::FlowBox::builder()
+        .max_children_per_line(4)
+        .selection_mode(gtk::SelectionMode::None)
+        .margin_start(8)
+        .margin_end(8)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
+
+    let color_button_ref = color_button.clone();
+    let selected_color_ref = selected_color.clone();
+
+    for &color in PROJECT_COLORS {
+        let color_option = gtk::Button::builder()
+            .css_classes(["project-color-button"])
+            .build();
+
+        let css = gtk::CssProvider::new();
+        css.load_from_string(&format!("button {{ background-color: {}; }}", color));
+        color_option.style_context().add_provider(
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+
+        let color_str = color.to_string();
+        let selected_color_clone = selected_color_ref.clone();
+        let color_button_clone = color_button_ref.clone();
+        let popover_clone = color_popover.clone();
+
+        color_option.connect_clicked(move |_| {
+            *selected_color_clone.borrow_mut() = color_str.clone();
+            // Update the color button appearance
+            let css = gtk::CssProvider::new();
+            css.load_from_string(&format!("button {{ background-color: {}; }}", color_str));
+            color_button_clone.style_context().add_provider(
+                &css,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+            popover_clone.popdown();
+        });
+
+        colors_grid.append(&color_option);
+    }
+
+    color_popover.set_child(Some(&colors_grid));
+    color_button.set_popover(Some(&color_popover));
+
+    new_project_box.append(&color_button);
+
+    // Project name entry
+    let name_entry = gtk::Entry::builder()
+        .placeholder_text("Project name")
+        .hexpand(true)
+        .build();
+    new_project_box.append(&name_entry);
+
+    // Add project button
+    let add_button = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add project")
+        .css_classes(["suggested-action"])
+        .build();
+
+    new_project_box.append(&add_button);
+
+    content.append(&new_project_box);
+
+    // Separator
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    content.append(&separator);
+
+    // Projects list
+    let scrolled_window = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .build();
+
+    let projects_list_box = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(12)
+        .margin_bottom(12)
+        .build();
+
+    scrolled_window.set_child(Some(&projects_list_box));
+    content.append(&scrolled_window);
+
+    // Initial load of projects
+    refresh_projects_list(&state, &projects_list_box);
+
+    // Connect add button click
+    let state_for_add = state.clone();
+    let name_entry_clone = name_entry.clone();
+    let selected_color_for_add = selected_color.clone();
+    let projects_list_box_clone = projects_list_box.clone();
+
+    add_button.connect_clicked(move |_| {
+        let name = name_entry_clone.text().to_string();
+        if name.trim().is_empty() {
+            return;
+        }
+
+        let color = selected_color_for_add.borrow().clone();
+        if let Err(e) = db::create_project(&state_for_add.borrow().db_conn, &name, &color) {
+            eprintln!("Failed to create project: {}", e);
+        } else {
+            // Clear the name entry
+            name_entry_clone.set_text("");
+            // Refresh the projects list in the dialog
+            refresh_projects_list(&state_for_add, &projects_list_box_clone);
+            // Refresh the project dropdown in the main window
+            state_for_add.borrow_mut().refresh_projects();
+        }
+    });
+
+    // Connect Enter key in name entry to add project
+    let state_for_activate = state.clone();
+    let selected_color_for_activate = selected_color.clone();
+    let projects_list_box_for_activate = projects_list_box.clone();
+
+    name_entry.connect_activate(move |entry| {
+        let name = entry.text().to_string();
+        if name.trim().is_empty() {
+            return;
+        }
+
+        let color = selected_color_for_activate.borrow().clone();
+        if let Err(e) = db::create_project(&state_for_activate.borrow().db_conn, &name, &color) {
+            eprintln!("Failed to create project: {}", e);
+        } else {
+            // Clear the name entry
+            entry.set_text("");
+            // Refresh the projects list in the dialog
+            refresh_projects_list(&state_for_activate, &projects_list_box_for_activate);
+            // Refresh the project dropdown in the main window
+            state_for_activate.borrow_mut().refresh_projects();
+        }
+    });
+
+    dialog.set_child(Some(&content));
+    dialog.present(parent);
+}
+
 /// Builds and returns the main application window with Adwaita styling.
 pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     // Apply CSS styles
@@ -634,6 +1054,13 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
     let header_bar = adw::HeaderBar::builder()
         .title_widget(&adw::WindowTitle::new("Time Tracking", ""))
         .build();
+
+    // Create menu button to access projects
+    let menu_button = gtk::Button::builder()
+        .icon_name("folder-symbolic")
+        .tooltip_text("Manage Projects")
+        .build();
+    header_bar.pack_end(&menu_button);
 
     // Create the description entry field
     let description_entry = create_description_entry();
@@ -762,6 +1189,13 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         if state_for_button.borrow_mut().toggle_timer() {
             refresh_entries_list_with_actions(state_for_button.clone(), &window_for_button);
         }
+    });
+
+    // Connect menu button to show projects dialog
+    let state_for_menu = state.clone();
+    let window_for_menu = window.clone();
+    menu_button.connect_clicked(move |_| {
+        show_projects_dialog(state_for_menu.clone(), &window_for_menu);
     });
 
     // Initial load of today's entries with action buttons
