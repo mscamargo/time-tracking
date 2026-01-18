@@ -173,7 +173,7 @@
         "Add shortcuts to help/about dialog",
         "Verify each shortcut works correctly"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "ui",

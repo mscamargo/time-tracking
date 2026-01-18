@@ -1062,6 +1062,13 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         .build();
     header_bar.pack_end(&menu_button);
 
+    // Create help button for keyboard shortcuts
+    let help_button = gtk::Button::builder()
+        .icon_name("help-about-symbolic")
+        .tooltip_text("Keyboard Shortcuts (F1)")
+        .build();
+    header_bar.pack_end(&help_button);
+
     // Create the description entry field
     let description_entry = create_description_entry();
 
@@ -1198,10 +1205,103 @@ pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
         show_projects_dialog(state_for_menu.clone(), &window_for_menu);
     });
 
+    // Connect help button to show shortcuts dialog
+    let window_for_help = window.clone();
+    help_button.connect_clicked(move |_| {
+        show_shortcuts_dialog(&window_for_help);
+    });
+
     // Initial load of today's entries with action buttons
     refresh_entries_list_with_actions(state.clone(), &window);
 
+    // Set up keyboard shortcuts
+    setup_keyboard_shortcuts(&window, state.clone(), &description_entry, &project_dropdown);
+
     window
+}
+
+/// Shows the keyboard shortcuts help dialog
+fn show_shortcuts_dialog(parent: &adw::ApplicationWindow) {
+    let dialog = adw::MessageDialog::builder()
+        .transient_for(parent)
+        .heading("Keyboard Shortcuts")
+        .body(
+            "Ctrl+S or Space — Start/Stop timer\n\
+             Ctrl+N — Focus description field\n\
+             Ctrl+P — Open project selector\n\
+             Escape — Stop timer if running\n\
+             F1 — Show this help"
+        )
+        .build();
+
+    dialog.add_response("close", "Close");
+    dialog.set_default_response(Some("close"));
+    dialog.set_close_response("close");
+    dialog.present();
+}
+
+/// Sets up keyboard shortcuts for the window
+fn setup_keyboard_shortcuts(
+    window: &adw::ApplicationWindow,
+    state: Rc<RefCell<AppState>>,
+    description_entry: &gtk::Entry,
+    project_dropdown: &gtk::DropDown,
+) {
+    let controller = gtk::EventControllerKey::new();
+
+    let state_for_key = state.clone();
+    let window_for_key = window.clone();
+    let description_entry_for_key = description_entry.clone();
+    let project_dropdown_for_key = project_dropdown.clone();
+
+    controller.connect_key_pressed(move |_, keyval, _keycode, modifier| {
+        let ctrl = modifier.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+
+        match keyval {
+            // Ctrl+S: Start/Stop timer
+            gtk::gdk::Key::s if ctrl => {
+                if state_for_key.borrow_mut().toggle_timer() {
+                    refresh_entries_list_with_actions(state_for_key.clone(), &window_for_key);
+                }
+                glib::Propagation::Stop
+            }
+            // Space: Start/Stop timer (only if not focused on text entry)
+            gtk::gdk::Key::space if !description_entry_for_key.has_focus() => {
+                if state_for_key.borrow_mut().toggle_timer() {
+                    refresh_entries_list_with_actions(state_for_key.clone(), &window_for_key);
+                }
+                glib::Propagation::Stop
+            }
+            // Ctrl+N: Focus description field
+            gtk::gdk::Key::n if ctrl => {
+                description_entry_for_key.grab_focus();
+                glib::Propagation::Stop
+            }
+            // Ctrl+P: Open project selector popup
+            gtk::gdk::Key::p if ctrl => {
+                // Activate the dropdown to show its popup
+                project_dropdown_for_key.activate();
+                glib::Propagation::Stop
+            }
+            // Escape: Stop timer if running
+            gtk::gdk::Key::Escape => {
+                if state_for_key.borrow().running_entry.is_some() {
+                    if state_for_key.borrow_mut().stop_timer() {
+                        refresh_entries_list_with_actions(state_for_key.clone(), &window_for_key);
+                    }
+                }
+                glib::Propagation::Stop
+            }
+            // F1: Show shortcuts help
+            gtk::gdk::Key::F1 => {
+                show_shortcuts_dialog(&window_for_key);
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        }
+    });
+
+    window.add_controller(controller);
 }
 
 /// Runs the Adwaita application.
