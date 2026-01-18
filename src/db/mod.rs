@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{Connection, Result, params};
 use std::fs;
 use std::path::PathBuf;
@@ -9,6 +9,17 @@ pub struct Project {
     pub id: i64,
     pub name: String,
     pub color: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Represents a time entry in the time tracking system
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeEntry {
+    pub id: i64,
+    pub project_id: Option<i64>,
+    pub description: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -115,6 +126,127 @@ pub fn get_all_projects(conn: &Connection) -> Result<Vec<Project>> {
 /// Deletes a project by ID
 pub fn delete_project(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Helper function to parse SQLite datetime strings to DateTime<Utc>
+fn parse_datetime(datetime_str: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(&format!("{}Z", datetime_str.replace(' ', "T")))
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+/// Creates a new time entry with the given project_id, description, and start_time
+pub fn create_entry(
+    conn: &Connection,
+    project_id: Option<i64>,
+    description: &str,
+    start_time: DateTime<Utc>,
+) -> Result<TimeEntry> {
+    let start_time_str = start_time.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    conn.execute(
+        "INSERT INTO time_entries (project_id, description, start_time) VALUES (?1, ?2, ?3)",
+        params![project_id, description, start_time_str],
+    )?;
+
+    let id = conn.last_insert_rowid();
+
+    conn.query_row(
+        "SELECT id, project_id, description, start_time, end_time, created_at FROM time_entries WHERE id = ?1",
+        params![id],
+        |row| {
+            let start_time_str: String = row.get(3)?;
+            let end_time_str: Option<String> = row.get(4)?;
+            let created_at_str: String = row.get(5)?;
+
+            Ok(TimeEntry {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                description: row.get(2)?,
+                start_time: parse_datetime(&start_time_str),
+                end_time: end_time_str.map(|s| parse_datetime(&s)),
+                created_at: parse_datetime(&created_at_str),
+            })
+        },
+    )
+}
+
+/// Stops a time entry by setting its end_time
+pub fn stop_entry(conn: &Connection, id: i64, end_time: DateTime<Utc>) -> Result<()> {
+    let end_time_str = end_time.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    conn.execute(
+        "UPDATE time_entries SET end_time = ?1 WHERE id = ?2",
+        params![end_time_str, id],
+    )?;
+
+    Ok(())
+}
+
+/// Gets the currently running time entry (entry with null end_time)
+pub fn get_running_entry(conn: &Connection) -> Result<Option<TimeEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, description, start_time, end_time, created_at
+         FROM time_entries
+         WHERE end_time IS NULL
+         ORDER BY start_time DESC
+         LIMIT 1"
+    )?;
+
+    let mut rows = stmt.query([])?;
+
+    match rows.next()? {
+        Some(row) => {
+            let start_time_str: String = row.get(3)?;
+            let end_time_str: Option<String> = row.get(4)?;
+            let created_at_str: String = row.get(5)?;
+
+            Ok(Some(TimeEntry {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                description: row.get(2)?,
+                start_time: parse_datetime(&start_time_str),
+                end_time: end_time_str.map(|s| parse_datetime(&s)),
+                created_at: parse_datetime(&created_at_str),
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Gets all time entries for a specific date
+pub fn get_entries_for_date(conn: &Connection, date: NaiveDate) -> Result<Vec<TimeEntry>> {
+    let date_str = date.format("%Y-%m-%d").to_string();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, description, start_time, end_time, created_at
+         FROM time_entries
+         WHERE date(start_time) = ?1
+         ORDER BY start_time DESC"
+    )?;
+
+    let entries = stmt.query_map(params![date_str], |row| {
+        let start_time_str: String = row.get(3)?;
+        let end_time_str: Option<String> = row.get(4)?;
+        let created_at_str: String = row.get(5)?;
+
+        Ok(TimeEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            description: row.get(2)?,
+            start_time: parse_datetime(&start_time_str),
+            end_time: end_time_str.map(|s| parse_datetime(&s)),
+            created_at: parse_datetime(&created_at_str),
+        })
+    })?;
+
+    entries.collect()
+}
+
+/// Deletes a time entry by ID
+pub fn delete_entry(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM time_entries WHERE id = ?1", params![id])?;
     Ok(())
 }
 
@@ -292,6 +424,158 @@ mod tests {
 
         // Deleting a non-existent project should not error
         let result = delete_project(&conn, 999);
+        assert!(result.is_ok());
+    }
+
+    // Time Entry CRUD Tests
+
+    #[test]
+    fn test_create_entry() {
+        let conn = create_test_db();
+        let start_time = Utc::now();
+
+        let entry = create_entry(&conn, None, "Working on task", start_time).unwrap();
+
+        assert_eq!(entry.id, 1);
+        assert_eq!(entry.project_id, None);
+        assert_eq!(entry.description, "Working on task");
+        assert!(entry.end_time.is_none());
+    }
+
+    #[test]
+    fn test_create_entry_with_project() {
+        let conn = create_test_db();
+        let project = create_project(&conn, "Work", "#3498db").unwrap();
+        let start_time = Utc::now();
+
+        let entry = create_entry(&conn, Some(project.id), "Project task", start_time).unwrap();
+
+        assert_eq!(entry.project_id, Some(project.id));
+        assert_eq!(entry.description, "Project task");
+    }
+
+    #[test]
+    fn test_stop_entry() {
+        let conn = create_test_db();
+        let start_time = Utc::now();
+        let entry = create_entry(&conn, None, "Task to stop", start_time).unwrap();
+
+        let end_time = Utc::now();
+        stop_entry(&conn, entry.id, end_time).unwrap();
+
+        // Verify the entry was stopped
+        let running = get_running_entry(&conn).unwrap();
+        assert!(running.is_none());
+    }
+
+    #[test]
+    fn test_get_running_entry_none() {
+        let conn = create_test_db();
+
+        let running = get_running_entry(&conn).unwrap();
+
+        assert!(running.is_none());
+    }
+
+    #[test]
+    fn test_get_running_entry_found() {
+        let conn = create_test_db();
+        let start_time = Utc::now();
+        let created = create_entry(&conn, None, "Running task", start_time).unwrap();
+
+        let running = get_running_entry(&conn).unwrap();
+
+        assert!(running.is_some());
+        let running_entry = running.unwrap();
+        assert_eq!(running_entry.id, created.id);
+        assert_eq!(running_entry.description, "Running task");
+        assert!(running_entry.end_time.is_none());
+    }
+
+    #[test]
+    fn test_get_running_entry_returns_most_recent() {
+        let conn = create_test_db();
+
+        // Create multiple running entries (edge case)
+        let start1 = Utc::now();
+        create_entry(&conn, None, "First task", start1).unwrap();
+
+        let start2 = Utc::now();
+        let second = create_entry(&conn, None, "Second task", start2).unwrap();
+
+        let running = get_running_entry(&conn).unwrap();
+
+        assert!(running.is_some());
+        // Should return the most recent by start_time
+        assert_eq!(running.unwrap().id, second.id);
+    }
+
+    #[test]
+    fn test_get_entries_for_date_empty() {
+        let conn = create_test_db();
+        let today = Utc::now().date_naive();
+
+        let entries = get_entries_for_date(&conn, today).unwrap();
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_get_entries_for_date() {
+        let conn = create_test_db();
+
+        // Create entries for today
+        let now = Utc::now();
+        create_entry(&conn, None, "Task 1", now).unwrap();
+        create_entry(&conn, None, "Task 2", now).unwrap();
+
+        let today = now.date_naive();
+        let entries = get_entries_for_date(&conn, today).unwrap();
+
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_get_entries_for_date_filters_by_date() {
+        let conn = create_test_db();
+
+        // Create an entry for today
+        let now = Utc::now();
+        create_entry(&conn, None, "Today's task", now).unwrap();
+
+        // Manually insert an entry for a different date
+        conn.execute(
+            "INSERT INTO time_entries (project_id, description, start_time) VALUES (NULL, 'Old task', '2020-01-15 10:00:00')",
+            [],
+        ).unwrap();
+
+        let today = now.date_naive();
+        let entries = get_entries_for_date(&conn, today).unwrap();
+
+        // Should only get today's entry
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].description, "Today's task");
+    }
+
+    #[test]
+    fn test_delete_entry() {
+        let conn = create_test_db();
+        let start_time = Utc::now();
+        let entry = create_entry(&conn, None, "Task to delete", start_time).unwrap();
+
+        delete_entry(&conn, entry.id).unwrap();
+
+        let today = start_time.date_naive();
+        let entries = get_entries_for_date(&conn, today).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_delete_nonexistent_entry() {
+        let conn = create_test_db();
+
+        // Deleting a non-existent entry should not error
+        let result = delete_entry(&conn, 999);
         assert!(result.is_ok());
     }
 }
