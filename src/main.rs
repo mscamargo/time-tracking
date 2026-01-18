@@ -1,6 +1,8 @@
 use gtk4 as gtk;
 use gtk::prelude::*;
 
+mod db;
+
 fn main() {
     let app = gtk::Application::builder()
         .application_id("com.example.time-tracking")

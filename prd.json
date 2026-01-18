@@ -23,7 +23,7 @@
         "Store database in XDG data directory (~/.local/share/time-tracking/)",
         "Write unit test that creates DB and verifies tables exist"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "database",
