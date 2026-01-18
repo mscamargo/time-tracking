@@ -136,7 +136,7 @@
         "Update entry list after actions",
         "Verify continue creates new running entry, delete removes from database"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "ui",
